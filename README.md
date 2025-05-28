@@ -1,6 +1,6 @@
 # 🧠 Enhanced Stock Price Prediction using Ito's Lemma and Machine Learning
 
-A sophisticated hybrid model that combines **stochastic calculus** (Ito's Lemma), **Geometric Brownian Motion (GBM)**, and **deep learning** to predict stock prices with enhanced accuracy. This project leverages LSTM networks with attention mechanisms to learn market dynamics and improve traditional financial modeling approaches.
+A hybrid model that combines **stochastic calculus** (Ito's Lemma), **Geometric Brownian Motion (GBM)**, and **deep learning** to predict stock prices with enhanced accuracy. This project leverages LSTM networks with attention mechanisms to learn market dynamics and improve traditional financial modeling approaches.
 
 ## 🚀 Features
 
