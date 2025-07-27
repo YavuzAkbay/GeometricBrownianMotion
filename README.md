@@ -1,41 +1,62 @@
-# Geometric Brownian Motion with Transformer Architecture
+# Geometric Brownian Motion with Transformer & Bayesian Neural Networks
 
 ## 🚀 Overview
 
-This project implements a state-of-the-art **Transformer-based Geometric Brownian Motion (GBM) model** for stock price prediction and analysis. The model combines the power of transformer architectures with traditional stochastic calculus to provide more accurate and robust predictions.
+This project implements a state-of-the-art **Transformer-based Geometric Brownian Motion (GBM) model** enhanced with **Bayesian Neural Networks** for stock price prediction and analysis. The model combines the power of transformer architectures with uncertainty quantification to provide more accurate and reliable predictions with confidence intervals.
 
 ## 🎯 Key Features
 
 ### **Transformer Architecture**
 - **Multi-Head Self-Attention**: Captures complex temporal dependencies
 - **Positional Encoding**: Maintains sequence order information
-- **Multi-Scale Feature Extraction**: Processes features at different scales
+- **Layer Normalization**: Pre-norm for training stability
+- **Gradient Clipping**: Prevents exploding gradients
+- **Learning Rate Warmup**: Stable training convergence
+
+### **Bayesian Neural Networks**
 - **Uncertainty Quantification**: Provides prediction confidence intervals
-- **Advanced Attention Mechanisms**: Better feature importance weighting
+- **Aleatoric Uncertainty**: Data noise estimation
+- **Epistemic Uncertainty**: Model knowledge uncertainty
+- **Monte Carlo Dropout**: Alternative uncertainty estimation
+- **KL Divergence Regularization**: Bayesian posterior optimization
 
 ### **Enhanced Capabilities**
 - **Real-time Stock Analysis**: Live data processing and prediction
 - **Comprehensive Technical Indicators**: RSI, MACD, Bollinger Bands, etc.
 - **Risk Management**: VaR, CVaR, and drawdown analysis
-- **Model Comparison**: Direct comparison between Transformer and LSTM
-- **Interactive Visualizations**: Rich plots and analysis charts
+- **Model Comparison**: Direct comparison between Bayesian and Regular Transformer
+- **Interactive Visualizations**: Rich plots and uncertainty analysis charts
 
 ## 🏗️ Architecture Details
 
 ### **TransformerStockPredictor**
 ```python
 class TransformerStockPredictor(nn.Module):
-    def __init__(self, input_size, d_model=256, nhead=8, num_layers=6, 
-                 dim_feedforward=1024, dropout=0.1, max_seq_length=100):
+    def __init__(self, input_size, d_model=128, nhead=8, num_layers=4, 
+                 dim_feedforward=512, dropout=0.1, max_seq_length=100):
 ```
 
 **Key Components:**
-- **Input Projection**: Maps features to transformer dimensions
+- **Input Normalization**: LayerNorm for stable training
 - **Positional Encoding**: Adds temporal position information
 - **Transformer Encoder**: Multi-layer self-attention processing
-- **Multi-Scale Feature Extractors**: 3 different feature scales
-- **Attention-Based Fusion**: Combines multi-scale features
-- **Output Heads**: Separate predictors for price, volatility, drift, and uncertainty
+- **Global Feature Extraction**: Mean pooling across sequence
+- **Output Heads**: Separate predictors for price, volatility, and drift
+- **Uncertainty Estimation**: Monte Carlo dropout for confidence intervals
+
+### **BayesianTransformerStockPredictor**
+```python
+class BayesianTransformerStockPredictor(nn.Module):
+    def __init__(self, input_size, d_model=128, nhead=8, num_layers=4, 
+                 dim_feedforward=512, dropout=0.1, max_seq_length=100,
+                 prior_std=1.0, posterior_std_init=0.1, num_samples=10):
+```
+
+**Key Components:**
+- **Bayesian Linear Layers**: Learnable weight and bias distributions
+- **KL Divergence Loss**: Regularization for Bayesian inference
+- **Uncertainty Decomposition**: Separates aleatoric and epistemic uncertainty
+- **Monte Carlo Sampling**: Multiple forward passes for uncertainty estimation
 
 ### **Advantages Over LSTM**
 | Feature | Transformer | LSTM |
@@ -52,12 +73,12 @@ class TransformerStockPredictor(nn.Module):
 ### **Expected Improvements**
 - **MSE Reduction**: 15-25% improvement over LSTM
 - **MAE Reduction**: 10-20% improvement over LSTM
+- **Uncertainty Quantification**: Confidence intervals for all predictions
 - **Better Long-term Predictions**: Superior handling of extended sequences
-- **Uncertainty Quantification**: Confidence intervals for predictions
 - **Faster Training**: Parallel processing capabilities
 
 ### **Model Complexity**
-- **Parameters**: ~4.9M trainable parameters
+- **Parameters**: ~2.1M trainable parameters (optimized)
 - **Memory Usage**: Efficient attention mechanisms
 - **Training Time**: Faster convergence than LSTM
 - **Inference Speed**: Real-time prediction capabilities
@@ -70,8 +91,10 @@ pip install -r requirements.txt
 ```
 
 ### **Basic Usage**
+
+#### **Train Regular Transformer Model**
 ```python
-from gbm import TransformerStockPredictor, train_enhanced_model
+from gbm import train_enhanced_model
 
 # Train transformer model
 model, scaler_X, scaler_y, data, features, metrics = train_enhanced_model(
@@ -82,11 +105,25 @@ model, scaler_X, scaler_y, data, features, metrics = train_enhanced_model(
 )
 ```
 
-### **Model Comparison**
+#### **Train Bayesian Neural Network**
+```python
+from gbm import train_bayesian_model
+
+# Train Bayesian model with uncertainty quantification
+bayesian_model, scaler_X, scaler_y, data, features, metrics = train_bayesian_model(
+    ticker="AAPL", 
+    sequence_length=60, 
+    epochs=50,
+    num_samples=10,
+    simplified=True  # Use Monte Carlo dropout for stability
+)
+```
+
+#### **Model Comparison**
 ```python
 from gbm import compare_models_performance
 
-# Compare Transformer vs LSTM
+# Compare Bayesian vs Regular Transformer
 results = compare_models_performance(
     ticker="AAPL", 
     sequence_length=60, 
@@ -94,9 +131,15 @@ results = compare_models_performance(
 )
 ```
 
-### **Testing**
-```bash
-python test_transformer.py
+#### **Run Complete Analysis**
+```python
+# The main execution automatically runs:
+# 1. Bayesian Neural Network training
+# 2. Uncertainty analysis and visualization
+# 3. Regular Transformer training for comparison
+# 4. Performance comparison and metrics
+
+python gbm.py
 ```
 
 ## 📈 Technical Indicators
@@ -126,18 +169,23 @@ The model incorporates comprehensive technical analysis:
 ## 🔬 Advanced Features
 
 ### **Uncertainty Quantification**
-The transformer model provides uncertainty estimates for each prediction:
+Both models provide uncertainty estimates for each prediction:
+
+#### **Regular Transformer (Monte Carlo Dropout)**
 ```python
-price_pred, vol_pred, drift_pred, uncertainty_pred = model(x)
+price_pred, vol_pred, drift_pred, uncertainty_pred = model.predict_with_uncertainty(x)
 ```
 
-### **Multi-Scale Processing**
-- **Scale 1**: Short-term patterns (5-10 days)
-- **Scale 2**: Medium-term trends (10-30 days)
-- **Scale 3**: Long-term cycles (30+ days)
+#### **Bayesian Neural Network**
+```python
+price_pred, vol_pred, drift_pred, aleatoric_unc, epistemic_unc = model(x, sample=True)
+```
 
-### **Attention Visualization**
-Attention weights show which time steps and features are most important for predictions.
+### **Uncertainty Analysis**
+- **Total Uncertainty**: Combined aleatoric and epistemic uncertainty
+- **Aleatoric Uncertainty**: Data noise (market volatility)
+- **Epistemic Uncertainty**: Model knowledge uncertainty
+- **Confidence Intervals**: Prediction ranges with specified confidence levels
 
 ## 📊 Visualization Examples
 
@@ -146,38 +194,48 @@ The model generates comprehensive visualizations:
 1. **Training Progress**: Loss curves and convergence analysis
 2. **Prediction Accuracy**: Actual vs predicted price scatter plots
 3. **Error Distribution**: Histograms of prediction errors
-4. **Model Comparison**: Side-by-side Transformer vs LSTM analysis
-5. **Risk Analysis**: VaR, CVaR, and drawdown calculations
-6. **Technical Analysis**: RSI, MACD, Bollinger Bands plots
+4. **Model Comparison**: Side-by-side Bayesian vs Regular Transformer analysis
+5. **Uncertainty Analysis**: Uncertainty vs prediction error correlation
+6. **Risk Analysis**: VaR, CVaR, and drawdown calculations
+7. **Technical Analysis**: RSI, MACD, Bollinger Bands plots
 
 ## 🎯 Use Cases
 
 ### **Portfolio Management**
 - Risk assessment and allocation
-- Expected return estimation
-- Volatility forecasting
+- Expected return estimation with confidence intervals
+- Volatility forecasting with uncertainty bounds
 
 ### **Trading Strategies**
-- Entry/exit timing
-- Position sizing
-- Risk management
+- Entry/exit timing with confidence levels
+- Position sizing based on prediction uncertainty
+- Risk management using uncertainty quantification
 
 ### **Research & Analysis**
 - Market regime detection
-- Factor analysis
-- Backtesting strategies
+- Factor analysis with uncertainty
+- Backtesting strategies with confidence intervals
 
 ## 🔧 Configuration
 
 ### **Model Hyperparameters**
 ```python
 # Transformer Configuration
-d_model = 256          # Model dimension
+d_model = 128          # Model dimension (optimized)
 nhead = 8              # Number of attention heads
-num_layers = 6         # Number of transformer layers
-dim_feedforward = 1024 # Feed-forward dimension
+num_layers = 4         # Number of transformer layers
+dim_feedforward = 512  # Feed-forward dimension
 dropout = 0.1          # Dropout rate
 max_seq_length = 100   # Maximum sequence length
+```
+
+### **Bayesian Configuration**
+```python
+# Bayesian Neural Network Configuration
+prior_std = 1.0        # Prior standard deviation
+posterior_std_init = 0.1  # Initial posterior standard deviation
+num_samples = 10       # Number of Monte Carlo samples
+kl_weight = 0.01       # KL divergence weight
 ```
 
 ### **Training Parameters**
@@ -185,8 +243,9 @@ max_seq_length = 100   # Maximum sequence length
 # Training Configuration
 sequence_length = 60   # Input sequence length
 batch_size = 32        # Batch size
-learning_rate = 0.001  # Learning rate
+learning_rate = 0.0001 # Learning rate (AdamW)
 epochs = 50            # Number of epochs
+weight_decay = 1e-4    # Weight decay for regularization
 ```
 
 ## 🚀 Performance Tips
@@ -197,25 +256,30 @@ epochs = 50            # Number of epochs
 - **Storage**: SSD recommended for data loading
 
 ### **Optimization Strategies**
-- **Gradient Clipping**: Prevents exploding gradients
-- **Learning Rate Scheduling**: Adaptive learning rates
+- **Gradient Clipping**: Prevents exploding gradients (max_norm=0.5)
+- **Learning Rate Scheduling**: Adaptive learning rates with patience
 - **Early Stopping**: Prevents overfitting
-- **Data Augmentation**: Improves generalization
+- **Layer Normalization**: Pre-norm for training stability
+- **Warmup**: Learning rate warmup for transformers
 
-## 📝 Future Enhancements
+## 📝 Current Features
 
-### **Planned Features**
+### **Implemented Features**
+- ✅ **Transformer Architecture**: Multi-head self-attention
+- ✅ **Bayesian Neural Networks**: Uncertainty quantification
+- ✅ **Monte Carlo Dropout**: Alternative uncertainty estimation
+- ✅ **Enhanced Feature Engineering**: Technical indicators
+- ✅ **Model Comparison**: Bayesian vs Regular Transformer
+- ✅ **Uncertainty Visualization**: Comprehensive uncertainty analysis
+- ✅ **Risk Management**: VaR, CVaR calculations
+- ✅ **Interactive Plots**: Rich visualization capabilities
+
+### **Future Enhancements**
 - **Multi-Asset Modeling**: Portfolio-level predictions
 - **Real-time Streaming**: Live market data integration
 - **Advanced Attention**: Sparse attention mechanisms
 - **Ensemble Methods**: Multiple model combination
-- **Bayesian Neural Networks**: Probabilistic predictions
-
-### **Research Directions**
-- **Regime Detection**: Market state classification
-- **Jump-Diffusion Models**: Sudden price movement modeling
-- **Stochastic Volatility**: Time-varying volatility
-- **Copula Models**: Multi-asset dependency modeling
+- **Temporal Fusion**: Multi-timeframe analysis
 
 ## 🤝 Contributing
 
@@ -234,7 +298,8 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - PyTorch team for the excellent deep learning framework
 - Yahoo Finance for financial data
 - The transformer architecture community for inspiration
+- Bayesian Neural Network research community
 
 ---
 
-**Note**: This model is for educational and research purposes. Always perform your own due diligence before making investment decisions.
+**Note**: This model is for educational and research purposes. Always perform your own due diligence before making investment decisions. The uncertainty quantification provides confidence intervals but does not guarantee investment outcomes.
