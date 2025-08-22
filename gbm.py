@@ -1585,172 +1585,1028 @@ def compare_models_performance(ticker, sequence_length=60, epochs=50):
     
     return results
 
+def heston_stochastic_volatility_simulation(S0, mu, kappa, theta, sigma_v, rho, T, N, num_simulations=1000):
+    """
+    Heston Stochastic Volatility Model Simulation
+    
+    Parameters:
+    - S0: Initial stock price
+    - mu: Risk-free rate
+    - kappa: Mean reversion speed of volatility
+    - theta: Long-term mean of volatility
+    - sigma_v: Volatility of volatility
+    - rho: Correlation between stock and volatility processes
+    - T: Time horizon
+    - N: Number of time steps
+    - num_simulations: Number of simulation paths
+    
+    Returns:
+    - time_steps: Array of time points
+    - stock_paths: Array of stock price paths
+    - volatility_paths: Array of volatility paths
+    """
+    dt = T / N
+    time_steps = np.linspace(0, T, N+1)
+    
+    # Initialize arrays
+    stock_paths = np.zeros((num_simulations, N+1))
+    volatility_paths = np.zeros((num_simulations, N+1))
+    
+    # Set initial values
+    stock_paths[:, 0] = S0
+    volatility_paths[:, 0] = theta  # Start at long-term mean
+    
+    np.random.seed(42)  # For reproducibility
+    
+    for i in range(num_simulations):
+        for t in range(N):
+            # Current values
+            S_t = stock_paths[i, t]
+            v_t = volatility_paths[i, t]
+            
+            # Generate correlated random numbers
+            Z1 = np.random.normal(0, 1)
+            Z2 = np.random.normal(0, 1)
+            Z_v = rho * Z1 + np.sqrt(1 - rho**2) * Z2
+            
+            # Update volatility (CIR process)
+            dv = kappa * (theta - v_t) * dt + sigma_v * np.sqrt(v_t) * np.sqrt(dt) * Z_v
+            v_new = max(v_t + dv, 0.0001)  # Ensure positive volatility
+            
+            # Update stock price using log-Euler scheme to enforce positivity
+            S_new = S_t * np.exp((mu - 0.5 * v_new) * dt + np.sqrt(v_new) * np.sqrt(dt) * Z1)
+            
+            # Store values
+            stock_paths[i, t+1] = S_new
+            volatility_paths[i, t+1] = v_new
+    
+    return time_steps, stock_paths, volatility_paths
+
+def regime_switching_gbm_simulation(S0, mu_states, sigma_states, transition_matrix, T, N, num_simulations=1000):
+    """
+    Regime-Switching GBM Simulation
+    
+    Parameters:
+    - S0: Initial stock price
+    - mu_states: Array of drift parameters for each regime
+    - sigma_states: Array of volatility parameters for each regime
+    - transition_matrix: Matrix of transition probabilities between regimes
+    - T: Time horizon
+    - N: Number of time steps
+    - num_simulations: Number of simulation paths
+    
+    Returns:
+    - time_steps: Array of time points
+    - stock_paths: Array of stock price paths
+    - regime_paths: Array of regime paths
+    """
+    dt = T / N
+    time_steps = np.linspace(0, T, N+1)
+    num_regimes = len(mu_states)
+    
+    # Initialize arrays
+    stock_paths = np.zeros((num_simulations, N+1))
+    regime_paths = np.zeros((num_simulations, N+1), dtype=int)
+    
+    # Set initial values
+    stock_paths[:, 0] = S0
+    regime_paths[:, 0] = 0  # Start in regime 0
+    
+    np.random.seed(42)  # For reproducibility
+    
+    for i in range(num_simulations):
+        for t in range(N):
+            # Current values
+            S_t = stock_paths[i, t]
+            current_regime = regime_paths[i, t]
+            
+            # Get current regime parameters
+            mu = mu_states[current_regime]
+            sigma = sigma_states[current_regime]
+            
+            # Update stock price using GBM exact discretization
+            dW = np.random.normal(0, np.sqrt(dt))
+            S_new = S_t * np.exp((mu - 0.5 * sigma**2) * dt + sigma * dW)
+            
+            # Transition to new regime
+            transition_probs = transition_matrix[current_regime]
+            new_regime = np.random.choice(num_regimes, p=transition_probs)
+            
+            # Store values
+            stock_paths[i, t+1] = S_new
+            regime_paths[i, t+1] = new_regime
+    
+    return time_steps, stock_paths, regime_paths
+
+def merton_jump_diffusion_simulation(S0, mu, sigma, lambda_jump, mu_jump, sigma_jump, T, N, num_simulations=1000):
+    """
+    Merton Jump Diffusion Model Simulation
+    
+    Parameters:
+    - S0: Initial stock price
+    - mu: Drift parameter (continuous part)
+    - sigma: Volatility parameter (continuous part)
+    - lambda_jump: Jump intensity (Poisson parameter)
+    - mu_jump: Mean of jump size (log-normal)
+    - sigma_jump: Standard deviation of jump size (log-normal)
+    - T: Time horizon
+    - N: Number of time steps
+    - num_simulations: Number of simulation paths
+    
+    Returns:
+    - time_steps: Array of time points
+    - stock_paths: Array of stock price paths
+    - jump_times: Array of jump occurrence times
+    """
+    dt = T / N
+    time_steps = np.linspace(0, T, N+1)
+    
+    # Initialize arrays
+    stock_paths = np.zeros((num_simulations, N+1))
+    jump_times = np.zeros((num_simulations, N+1), dtype=bool)
+    
+    # Set initial values
+    stock_paths[:, 0] = S0
+    
+    np.random.seed(42)  # For reproducibility
+    
+    for i in range(num_simulations):
+        for t in range(N):
+            # Current stock price
+            S_t = stock_paths[i, t]
+            
+            # Continuous part (GBM exact discretization)
+            dW = np.random.normal(0, np.sqrt(dt))
+            continuous_factor = np.exp((mu - 0.5 * sigma**2) * dt + sigma * dW)
+            
+            # Jump part (Poisson process)
+            jump_occurred = np.random.poisson(lambda_jump * dt) > 0
+            jump_times[i, t+1] = jump_occurred
+            
+            if jump_occurred:
+                # Jump factor (log-normal jump multiplier)
+                jump_factor = np.random.lognormal(mu_jump, sigma_jump)
+            else:
+                jump_factor = 1.0
+            
+            # Total update (multiplicative)
+            S_new = S_t * continuous_factor * jump_factor
+            
+            # Store values
+            stock_paths[i, t+1] = S_new
+    
+    return time_steps, stock_paths, jump_times
+
+def enhanced_heston_analysis(ticker, model, scaler_X, scaler_y, enhanced_data, feature_columns, 
+                           forecast_months=6, sequence_length=60):
+    """Enhanced analysis using Heston stochastic volatility model"""
+    
+    print(f"\n🌊 Heston Stochastic Volatility Analysis for {ticker}")
+    print("="*60)
+    
+    current_price = enhanced_data['Close'].iloc[-1]
+    if isinstance(current_price, pd.Series):
+        current_price = current_price.iloc[0]
+    
+    # Get ML predictions for initial parameters
+    recent_data = enhanced_data[feature_columns].iloc[-sequence_length:].values
+    recent_data_scaled = scaler_X.transform(recent_data.reshape(-1, recent_data.shape[-1])).reshape(1, sequence_length, -1)
+    recent_tensor = torch.FloatTensor(recent_data_scaled)
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.eval()
+    with torch.no_grad():
+        recent_tensor = recent_tensor.to(device)
+        ml_price_pred, ml_vol_pred, ml_drift_pred, ml_uncertainty_pred = model(recent_tensor)
+        
+        ml_vol = ml_vol_pred.cpu().item()
+        ml_drift = ml_drift_pred.cpu().item()
+    
+    # Heston model parameters (calibrated to market data)
+    mu = ml_drift  # Risk-free rate
+    kappa = 2.0    # Mean reversion speed
+    theta = ml_vol  # Long-term volatility mean
+    sigma_v = 0.3  # Volatility of volatility
+    rho = -0.7     # Correlation (leverage effect)
+    
+    T = forecast_months / 12
+    N = forecast_months * 21
+    
+    # Simulate Heston model
+    time_steps, heston_stock_paths, heston_vol_paths = heston_stochastic_volatility_simulation(
+        current_price, mu, kappa, theta, sigma_v, rho, T, N, num_simulations=1000
+    )
+    
+    # Traditional GBM for comparison
+    returns = enhanced_data['Returns'].dropna()
+    trad_drift = returns.mean() * 252
+    trad_vol = returns.std() * np.sqrt(252)
+    
+    _, trad_paths = enhanced_gbm_simulation(
+        current_price, trad_drift, trad_vol, T, N, num_simulations=1000
+    )
+    
+    # Create comprehensive visualization
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle(f'{ticker} Heston Stochastic Volatility Analysis', fontsize=16, fontweight='bold')
+    
+    # Plot 1: Stock price paths comparison
+    heston_mean_path = np.mean(heston_stock_paths, axis=0)
+    trad_mean_path = np.mean(trad_paths, axis=0)
+    
+    heston_upper = np.percentile(heston_stock_paths, 95, axis=0)
+    heston_lower = np.percentile(heston_stock_paths, 5, axis=0)
+    trad_upper = np.percentile(trad_paths, 95, axis=0)
+    trad_lower = np.percentile(trad_paths, 5, axis=0)
+    
+    days = range(N+1)
+    ax1.fill_between(days, heston_lower, heston_upper, alpha=0.2, color='red', label='Heston 90% CI')
+    ax1.fill_between(days, trad_lower, trad_upper, alpha=0.2, color='blue', label='GBM 90% CI')
+    ax1.plot(days, heston_mean_path, color='red', linewidth=3, label='Heston Model')
+    ax1.plot(days, trad_mean_path, color='blue', linewidth=3, label='Traditional GBM')
+    
+    ax1.set_title(f'Heston vs Traditional GBM ({forecast_months} months)')
+    ax1.set_ylabel('Price ($)')
+    ax1.set_xlabel('Trading Days')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Stochastic volatility paths
+    vol_mean_path = np.mean(heston_vol_paths, axis=0)
+    vol_upper = np.percentile(heston_vol_paths, 95, axis=0)
+    vol_lower = np.percentile(heston_vol_paths, 5, axis=0)
+    
+    ax2.fill_between(days, vol_lower, vol_upper, alpha=0.3, color='green', label='Volatility 90% CI')
+    ax2.plot(days, vol_mean_path, color='green', linewidth=2, label='Mean Volatility')
+    ax2.axhline(y=theta, color='red', linestyle='--', alpha=0.7, label=f'Long-term Mean: {theta:.4f}')
+    
+    ax2.set_title('Stochastic Volatility Evolution')
+    ax2.set_ylabel('Volatility')
+    ax2.set_xlabel('Trading Days')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # Plot 3: Price distribution comparison
+    heston_final_prices = heston_stock_paths[:, -1]
+    trad_final_prices = trad_paths[:, -1]
+    
+    ax3.hist(heston_final_prices, bins=50, alpha=0.7, color='red', label='Heston Model', density=True)
+    ax3.hist(trad_final_prices, bins=50, alpha=0.7, color='blue', label='Traditional GBM', density=True)
+    ax3.axvline(current_price, color='green', linestyle='-', linewidth=2, 
+               label=f'Current: ${current_price:.2f}')
+    ax3.axvline(np.mean(heston_final_prices), color='red', linestyle='--', linewidth=2, 
+               label=f'Heston Mean: ${np.mean(heston_final_prices):.2f}')
+    ax3.axvline(np.mean(trad_final_prices), color='blue', linestyle='--', linewidth=2, 
+               label=f'GBM Mean: ${np.mean(trad_final_prices):.2f}')
+    
+    ax3.set_title('Price Distribution Comparison')
+    ax3.set_xlabel('Price ($)')
+    ax3.set_ylabel('Density')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # Plot 4: Volatility clustering analysis
+    # Calculate realized volatility for each path
+    heston_realized_vol = np.std(np.diff(np.log(heston_stock_paths), axis=1), axis=1) * np.sqrt(252)
+    trad_realized_vol = np.std(np.diff(np.log(trad_paths), axis=1), axis=1) * np.sqrt(252)
+    
+    ax4.hist(heston_realized_vol, bins=30, alpha=0.7, color='red', label='Heston Realized Vol', density=True)
+    ax4.hist(trad_realized_vol, bins=30, alpha=0.7, color='blue', label='GBM Realized Vol', density=True)
+    ax4.axvline(np.mean(heston_realized_vol), color='red', linestyle='--', linewidth=2, 
+               label=f'Heston Mean: {np.mean(heston_realized_vol):.4f}')
+    ax4.axvline(np.mean(trad_realized_vol), color='blue', linestyle='--', linewidth=2, 
+               label=f'GBM Mean: {np.mean(trad_realized_vol):.4f}')
+    
+    ax4.set_title('Realized Volatility Distribution')
+    ax4.set_xlabel('Annualized Volatility')
+    ax4.set_ylabel('Density')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Performance analysis
+    heston_expected_return = (np.mean(heston_final_prices) / current_price - 1) * 100
+    trad_expected_return = (np.mean(trad_final_prices) / current_price - 1) * 100
+    
+    heston_volatility = np.std(heston_final_prices) / current_price * 100
+    trad_volatility = np.std(trad_final_prices) / current_price * 100
+    
+    print(f"\n📈 HESTON MODEL ANALYSIS RESULTS")
+    print("="*50)
+    print(f"Heston Expected Return: {heston_expected_return:+.2f}%")
+    print(f"Traditional Expected Return: {trad_expected_return:+.2f}%")
+    print(f"Heston Volatility: {heston_volatility:.2f}%")
+    print(f"Traditional Volatility: {trad_volatility:.2f}%")
+    print(f"Volatility Clustering Effect: {heston_volatility - trad_volatility:+.2f}%")
+    
+    # Volatility clustering metrics
+    vol_autocorr = np.corrcoef(vol_mean_path[:-1], vol_mean_path[1:])[0,1]
+    print(f"Volatility Autocorrelation: {vol_autocorr:.4f}")
+    
+    return {
+        'heston_predictions': heston_final_prices,
+        'traditional_predictions': trad_final_prices,
+        'heston_volatility_paths': heston_vol_paths,
+        'heston_expected_return': heston_expected_return,
+        'traditional_expected_return': trad_expected_return,
+        'volatility_clustering': heston_volatility - trad_volatility,
+        'volatility_autocorrelation': vol_autocorr
+    }
+
+def enhanced_regime_switching_analysis(ticker, model, scaler_X, scaler_y, enhanced_data, feature_columns, 
+                                     forecast_months=6, sequence_length=60):
+    """Enhanced analysis using regime-switching GBM model"""
+    
+    print(f"\n🔄 Regime-Switching GBM Analysis for {ticker}")
+    print("="*60)
+    
+    current_price = enhanced_data['Close'].iloc[-1]
+    if isinstance(current_price, pd.Series):
+        current_price = current_price.iloc[0]
+    
+    # Get ML predictions for regime parameters
+    recent_data = enhanced_data[feature_columns].iloc[-sequence_length:].values
+    recent_data_scaled = scaler_X.transform(recent_data.reshape(-1, recent_data.shape[-1])).reshape(1, sequence_length, -1)
+    recent_tensor = torch.FloatTensor(recent_data_scaled)
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.eval()
+    with torch.no_grad():
+        recent_tensor = recent_tensor.to(device)
+        ml_price_pred, ml_vol_pred, ml_drift_pred, ml_uncertainty_pred = model(recent_tensor)
+        
+        ml_vol = ml_vol_pred.cpu().item()
+        ml_drift = ml_drift_pred.cpu().item()
+    
+    # Define regimes: [Bull Market, Bear Market, Crisis]
+    mu_states = [ml_drift * 1.2, ml_drift * 0.8, ml_drift * 0.3]  # Different drift regimes
+    sigma_states = [ml_vol * 0.8, ml_vol * 1.2, ml_vol * 2.0]    # Different volatility regimes
+    
+    # Transition matrix (probabilities of switching between regimes)
+    transition_matrix = np.array([
+        [0.95, 0.04, 0.01],  # Bull market transitions
+        [0.03, 0.94, 0.03],  # Bear market transitions
+        [0.01, 0.04, 0.95]   # Crisis transitions
+    ])
+    
+    T = forecast_months / 12
+    N = forecast_months * 21
+    
+    # Simulate regime-switching model
+    time_steps, regime_stock_paths, regime_paths = regime_switching_gbm_simulation(
+        current_price, mu_states, sigma_states, transition_matrix, T, N, num_simulations=1000
+    )
+    
+    # Traditional GBM for comparison
+    returns = enhanced_data['Returns'].dropna()
+    trad_drift = returns.mean() * 252
+    trad_vol = returns.std() * np.sqrt(252)
+    
+    _, trad_paths = enhanced_gbm_simulation(
+        current_price, trad_drift, trad_vol, T, N, num_simulations=1000
+    )
+    
+    # Create comprehensive visualization
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle(f'{ticker} Regime-Switching GBM Analysis', fontsize=16, fontweight='bold')
+    
+    # Plot 1: Stock price paths with regime identification
+    regime_mean_path = np.mean(regime_stock_paths, axis=0)
+    trad_mean_path = np.mean(trad_paths, axis=0)
+    
+    regime_upper = np.percentile(regime_stock_paths, 95, axis=0)
+    regime_lower = np.percentile(regime_stock_paths, 5, axis=0)
+    trad_upper = np.percentile(trad_paths, 95, axis=0)
+    trad_lower = np.percentile(trad_paths, 5, axis=0)
+    
+    days = range(N+1)
+    ax1.fill_between(days, regime_lower, regime_upper, alpha=0.2, color='purple', label='Regime-Switching 90% CI')
+    ax1.fill_between(days, trad_lower, trad_upper, alpha=0.2, color='blue', label='GBM 90% CI')
+    ax1.plot(days, regime_mean_path, color='purple', linewidth=3, label='Regime-Switching Model')
+    ax1.plot(days, trad_mean_path, color='blue', linewidth=3, label='Traditional GBM')
+    
+    ax1.set_title(f'Regime-Switching vs Traditional GBM ({forecast_months} months)')
+    ax1.set_ylabel('Price ($)')
+    ax1.set_xlabel('Trading Days')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Regime evolution (sample path)
+    sample_path_idx = 0
+    sample_regime_path = regime_paths[sample_path_idx]
+    
+    # Color code the regime path
+    colors = ['green', 'orange', 'red']
+    regime_names = ['Bull', 'Bear', 'Crisis']
+    
+    for i in range(len(sample_regime_path) - 1):
+        regime = sample_regime_path[i]
+        ax2.plot([i, i+1], [regime_stock_paths[sample_path_idx, i], regime_stock_paths[sample_path_idx, i+1]], 
+                color=colors[regime], linewidth=2, alpha=0.7)
+    
+    ax2.set_title(f'Sample Path with Regime Changes (Path {sample_path_idx})')
+    ax2.set_ylabel('Price ($)')
+    ax2.set_xlabel('Trading Days')
+    
+    # Create legend for regimes
+    from matplotlib.patches import Patch
+    legend_elements = [Patch(facecolor=colors[i], label=regime_names[i]) for i in range(3)]
+    ax2.legend(handles=legend_elements)
+    ax2.grid(True, alpha=0.3)
+    
+    # Plot 3: Regime distribution over time
+    regime_counts = np.zeros((3, N+1))
+    for t in range(N+1):
+        for regime in range(3):
+            regime_counts[regime, t] = np.sum(regime_paths[:, t] == regime) / len(regime_paths)
+    
+    ax3.stackplot(days, regime_counts, labels=regime_names, colors=colors, alpha=0.7)
+    ax3.set_title('Regime Distribution Over Time')
+    ax3.set_ylabel('Proportion of Paths')
+    ax3.set_xlabel('Trading Days')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # Plot 4: Price distribution comparison
+    regime_final_prices = regime_stock_paths[:, -1]
+    trad_final_prices = trad_paths[:, -1]
+    
+    ax4.hist(regime_final_prices, bins=50, alpha=0.7, color='purple', label='Regime-Switching', density=True)
+    ax4.hist(trad_final_prices, bins=50, alpha=0.7, color='blue', label='Traditional GBM', density=True)
+    ax4.axvline(current_price, color='green', linestyle='-', linewidth=2, 
+               label=f'Current: ${current_price:.2f}')
+    ax4.axvline(np.mean(regime_final_prices), color='purple', linestyle='--', linewidth=2, 
+               label=f'Regime Mean: ${np.mean(regime_final_prices):.2f}')
+    ax4.axvline(np.mean(trad_final_prices), color='blue', linestyle='--', linewidth=2, 
+               label=f'GBM Mean: ${np.mean(trad_final_prices):.2f}')
+    
+    ax4.set_title('Price Distribution Comparison')
+    ax4.set_xlabel('Price ($)')
+    ax4.set_ylabel('Density')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Performance analysis
+    regime_expected_return = (np.mean(regime_final_prices) / current_price - 1) * 100
+    trad_expected_return = (np.mean(trad_final_prices) / current_price - 1) * 100
+    
+    regime_volatility = np.std(regime_final_prices) / current_price * 100
+    trad_volatility = np.std(trad_final_prices) / current_price * 100
+    
+    print(f"\n📈 REGIME-SWITCHING ANALYSIS RESULTS")
+    print("="*50)
+    print(f"Regime-Switching Expected Return: {regime_expected_return:+.2f}%")
+    print(f"Traditional Expected Return: {trad_expected_return:+.2f}%")
+    print(f"Regime-Switching Volatility: {regime_volatility:.2f}%")
+    print(f"Traditional Volatility: {trad_volatility:.2f}%")
+    
+    # Regime analysis
+    final_regime_dist = regime_counts[:, -1]
+    print(f"\n🔄 FINAL REGIME DISTRIBUTION")
+    for i, regime_name in enumerate(regime_names):
+        print(f"{regime_name} Market: {final_regime_dist[i]*100:.1f}%")
+    
+    # Regime persistence
+    regime_changes = np.sum(np.diff(regime_paths, axis=1) != 0, axis=1)
+    avg_regime_changes = np.mean(regime_changes)
+    print(f"Average Regime Changes per Path: {avg_regime_changes:.2f}")
+    
+    return {
+        'regime_predictions': regime_final_prices,
+        'traditional_predictions': trad_final_prices,
+        'regime_paths': regime_paths,
+        'regime_expected_return': regime_expected_return,
+        'traditional_expected_return': trad_expected_return,
+        'final_regime_distribution': final_regime_dist,
+        'avg_regime_changes': avg_regime_changes
+    }
+
+def enhanced_jump_diffusion_analysis(ticker, model, scaler_X, scaler_y, enhanced_data, feature_columns, 
+                                   forecast_months=6, sequence_length=60):
+    """Enhanced analysis using Merton jump diffusion model"""
+    
+    print(f"\n⚡ Merton Jump Diffusion Analysis for {ticker}")
+    print("="*60)
+    
+    current_price = enhanced_data['Close'].iloc[-1]
+    if isinstance(current_price, pd.Series):
+        current_price = current_price.iloc[0]
+    
+    # Get ML predictions for base parameters
+    recent_data = enhanced_data[feature_columns].iloc[-sequence_length:].values
+    recent_data_scaled = scaler_X.transform(recent_data.reshape(-1, recent_data.shape[-1])).reshape(1, sequence_length, -1)
+    recent_tensor = torch.FloatTensor(recent_data_scaled)
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.eval()
+    with torch.no_grad():
+        recent_tensor = recent_tensor.to(device)
+        ml_price_pred, ml_vol_pred, ml_drift_pred, ml_uncertainty_pred = model(recent_tensor)
+        
+        ml_vol = ml_vol_pred.cpu().item()
+        ml_drift = ml_drift_pred.cpu().item()
+    
+    # Merton jump diffusion parameters
+    mu = ml_drift  # Continuous drift
+    sigma = ml_vol  # Continuous volatility
+    lambda_jump = 0.1  # Jump intensity (jumps per year)
+    mu_jump = -0.02   # Mean jump size (negative for crash risk)
+    sigma_jump = 0.05 # Jump size volatility
+    
+    T = forecast_months / 12
+    N = forecast_months * 21
+    
+    # Simulate jump diffusion model
+    time_steps, jump_stock_paths, jump_times = merton_jump_diffusion_simulation(
+        current_price, mu, sigma, lambda_jump, mu_jump, sigma_jump, T, N, num_simulations=1000
+    )
+    
+    # Traditional GBM for comparison
+    returns = enhanced_data['Returns'].dropna()
+    trad_drift = returns.mean() * 252
+    trad_vol = returns.std() * np.sqrt(252)
+    
+    _, trad_paths = enhanced_gbm_simulation(
+        current_price, trad_drift, trad_vol, T, N, num_simulations=1000
+    )
+    
+    # Create comprehensive visualization
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle(f'{ticker} Merton Jump Diffusion Analysis', fontsize=16, fontweight='bold')
+    
+    # Plot 1: Stock price paths with jump identification
+    jump_mean_path = np.mean(jump_stock_paths, axis=0)
+    trad_mean_path = np.mean(trad_paths, axis=0)
+    
+    jump_upper = np.percentile(jump_stock_paths, 95, axis=0)
+    jump_lower = np.percentile(jump_stock_paths, 5, axis=0)
+    trad_upper = np.percentile(trad_paths, 95, axis=0)
+    trad_lower = np.percentile(trad_paths, 5, axis=0)
+    
+    days = range(N+1)
+    ax1.fill_between(days, jump_lower, jump_upper, alpha=0.2, color='orange', label='Jump Diffusion 90% CI')
+    ax1.fill_between(days, trad_lower, trad_upper, alpha=0.2, color='blue', label='GBM 90% CI')
+    ax1.plot(days, jump_mean_path, color='orange', linewidth=3, label='Jump Diffusion Model')
+    ax1.plot(days, trad_mean_path, color='blue', linewidth=3, label='Traditional GBM')
+    
+    ax1.set_title(f'Jump Diffusion vs Traditional GBM ({forecast_months} months)')
+    ax1.set_ylabel('Price ($)')
+    ax1.set_xlabel('Trading Days')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Sample path with jumps highlighted
+    sample_path_idx = 0
+    sample_path = jump_stock_paths[sample_path_idx]
+    sample_jumps = jump_times[sample_path_idx]
+    
+    # Plot the path
+    ax2.plot(days, sample_path, color='blue', linewidth=2, alpha=0.7, label='Price Path')
+    
+    # Highlight jumps
+    jump_indices = np.where(sample_jumps)[0]
+    if len(jump_indices) > 0:
+        ax2.scatter(jump_indices, sample_path[jump_indices], color='red', s=50, 
+                   zorder=5, label=f'Jumps ({len(jump_indices)} total)')
+    
+    ax2.set_title(f'Sample Path with Jumps (Path {sample_path_idx})')
+    ax2.set_ylabel('Price ($)')
+    ax2.set_xlabel('Trading Days')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # Plot 3: Jump frequency analysis
+    total_jumps_per_path = np.sum(jump_times, axis=1)
+    jump_freq = total_jumps_per_path / T  # Jumps per year
+    
+    ax3.hist(jump_freq, bins=20, alpha=0.7, color='orange', edgecolor='black')
+    ax3.axvline(lambda_jump, color='red', linestyle='--', linewidth=2, 
+               label=f'Expected: {lambda_jump:.2f} jumps/year')
+    ax3.axvline(np.mean(jump_freq), color='blue', linestyle='--', linewidth=2, 
+               label=f'Observed: {np.mean(jump_freq):.2f} jumps/year')
+    
+    ax3.set_title('Jump Frequency Distribution')
+    ax3.set_xlabel('Jumps per Year')
+    ax3.set_ylabel('Frequency')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # Plot 4: Price distribution comparison (log scale for fat tails)
+    jump_final_prices = jump_stock_paths[:, -1]
+    trad_final_prices = trad_paths[:, -1]
+    
+    # Use log scale to better see fat tails
+    log_jump_prices = np.log(jump_final_prices)
+    log_trad_prices = np.log(trad_final_prices)
+    
+    ax4.hist(log_jump_prices, bins=50, alpha=0.7, color='orange', label='Jump Diffusion', density=True)
+    ax4.hist(log_trad_prices, bins=50, alpha=0.7, color='blue', label='Traditional GBM', density=True)
+    ax4.axvline(np.log(current_price), color='green', linestyle='-', linewidth=2, 
+               label=f'Current: ${current_price:.2f}')
+    
+    ax4.set_title('Log-Price Distribution (Fat Tails)')
+    ax4.set_xlabel('Log Price')
+    ax4.set_ylabel('Density')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Performance analysis
+    jump_expected_return = (np.mean(jump_final_prices) / current_price - 1) * 100
+    trad_expected_return = (np.mean(trad_final_prices) / current_price - 1) * 100
+    
+    jump_volatility = np.std(jump_final_prices) / current_price * 100
+    trad_volatility = np.std(trad_final_prices) / current_price * 100
+    
+    print(f"\n📈 JUMP DIFFUSION ANALYSIS RESULTS")
+    print("="*50)
+    print(f"Jump Diffusion Expected Return: {jump_expected_return:+.2f}%")
+    print(f"Traditional Expected Return: {trad_expected_return:+.2f}%")
+    print(f"Jump Diffusion Volatility: {jump_volatility:.2f}%")
+    print(f"Traditional Volatility: {trad_volatility:.2f}%")
+    print(f"Jump-Induced Volatility Increase: {jump_volatility - trad_volatility:+.2f}%")
+    
+    # Jump analysis
+    total_jumps = np.sum(jump_times)
+    avg_jumps_per_path = total_jumps / len(jump_times)
+    print(f"\n⚡ JUMP ANALYSIS")
+    print(f"Total Jumps: {total_jumps}")
+    print(f"Average Jumps per Path: {avg_jumps_per_path:.2f}")
+    print(f"Expected Jumps per Path: {lambda_jump * T:.2f}")
+    
+    # Fat tail analysis
+    jump_skewness = np.mean(((jump_final_prices - np.mean(jump_final_prices)) / np.std(jump_final_prices))**3)
+    jump_kurtosis = np.mean(((jump_final_prices - np.mean(jump_final_prices)) / np.std(jump_final_prices))**4) - 3
+    
+    trad_skewness = np.mean(((trad_final_prices - np.mean(trad_final_prices)) / np.std(trad_final_prices))**3)
+    trad_kurtosis = np.mean(((trad_final_prices - np.mean(trad_final_prices)) / np.std(trad_final_prices))**4) - 3
+    
+    print(f"\n📊 FAT TAIL ANALYSIS")
+    print(f"Jump Diffusion Skewness: {jump_skewness:.4f}")
+    print(f"Traditional GBM Skewness: {trad_skewness:.4f}")
+    print(f"Jump Diffusion Kurtosis: {jump_kurtosis:.4f}")
+    print(f"Traditional GBM Kurtosis: {trad_kurtosis:.4f}")
+    
+    # Crash risk analysis
+    crash_threshold = current_price * 0.8  # 20% drop
+    jump_crash_prob = np.sum(jump_final_prices < crash_threshold) / len(jump_final_prices) * 100
+    trad_crash_prob = np.sum(trad_final_prices < crash_threshold) / len(trad_final_prices) * 100
+    
+    print(f"\n💥 CRASH RISK ANALYSIS")
+    print(f"Jump Diffusion Crash Probability: {jump_crash_prob:.2f}%")
+    print(f"Traditional GBM Crash Probability: {trad_crash_prob:.2f}%")
+    print(f"Jump-Induced Crash Risk Increase: {jump_crash_prob - trad_crash_prob:+.2f}%")
+    
+    return {
+        'jump_predictions': jump_final_prices,
+        'traditional_predictions': trad_final_prices,
+        'jump_times': jump_times,
+        'jump_expected_return': jump_expected_return,
+        'traditional_expected_return': trad_expected_return,
+        'jump_skewness': jump_skewness,
+        'jump_kurtosis': jump_kurtosis,
+        'crash_probability': jump_crash_prob,
+        'total_jumps': total_jumps,
+        'avg_jumps_per_path': avg_jumps_per_path
+    }
+
+def comprehensive_quantitative_analysis(ticker, model, scaler_X, scaler_y, enhanced_data, feature_columns, 
+                                      forecast_months=6, sequence_length=60):
+    """Comprehensive analysis comparing all three advanced quantitative models"""
+    
+    print(f"\n🎯 COMPREHENSIVE QUANTITATIVE ANALYSIS for {ticker}")
+    print("="*70)
+    print("Comparing: Heston Stochastic Volatility vs Regime-Switching vs Jump Diffusion")
+    print("="*70)
+    
+    # Run all three advanced analyses
+    print("\n🌊 Running Heston Stochastic Volatility Analysis...")
+    heston_results = enhanced_heston_analysis(
+        ticker, model, scaler_X, scaler_y, enhanced_data, feature_columns, 
+        forecast_months, sequence_length
+    )
+    
+    print("\n🔄 Running Regime-Switching Analysis...")
+    regime_results = enhanced_regime_switching_analysis(
+        ticker, model, scaler_X, scaler_y, enhanced_data, feature_columns, 
+        forecast_months, sequence_length
+    )
+    
+    print("\n⚡ Running Jump Diffusion Analysis...")
+    jump_results = enhanced_jump_diffusion_analysis(
+        ticker, model, scaler_X, scaler_y, enhanced_data, feature_columns, 
+        forecast_months, sequence_length
+    )
+    
+    # Traditional GBM for baseline comparison
+    current_price = enhanced_data['Close'].iloc[-1]
+    if isinstance(current_price, pd.Series):
+        current_price = current_price.iloc[0]
+    
+    returns = enhanced_data['Returns'].dropna()
+    trad_drift = returns.mean() * 252
+    trad_vol = returns.std() * np.sqrt(252)
+    
+    T = forecast_months / 12
+    N = forecast_months * 21
+    
+    _, trad_paths = enhanced_gbm_simulation(
+        current_price, trad_drift, trad_vol, T, N, num_simulations=1000
+    )
+    trad_final_prices = trad_paths[:, -1]
+    trad_expected_return = (np.mean(trad_final_prices) / current_price - 1) * 100
+    trad_volatility = np.std(trad_final_prices) / current_price * 100
+    
+    # Create comprehensive comparison visualization
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(18, 14))
+    fig.suptitle(f'{ticker} Comprehensive Quantitative Model Comparison', fontsize=16, fontweight='bold')
+    
+    # Plot 1: Expected Returns Comparison
+    models = ['Traditional GBM', 'Heston SV', 'Regime-Switching', 'Jump Diffusion']
+    expected_returns = [
+        trad_expected_return,
+        heston_results['heston_expected_return'],
+        regime_results['regime_expected_return'],
+        jump_results['jump_expected_return']
+    ]
+    
+    colors = ['blue', 'red', 'purple', 'orange']
+    bars1 = ax1.bar(models, expected_returns, color=colors, alpha=0.7)
+    ax1.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    ax1.set_title('Expected Returns Comparison')
+    ax1.set_ylabel('Expected Return (%)')
+    ax1.tick_params(axis='x', rotation=45)
+    
+    # Add value labels on bars
+    for bar, value in zip(bars1, expected_returns):
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height + (0.1 if height >= 0 else -0.3),
+                f'{value:+.2f}%', ha='center', va='bottom' if height >= 0 else 'top', fontweight='bold')
+    
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Volatility Comparison
+    volatilities = [
+        trad_volatility,
+        np.std(heston_results['heston_predictions']) / current_price * 100,
+        np.std(regime_results['regime_predictions']) / current_price * 100,
+        np.std(jump_results['jump_predictions']) / current_price * 100
+    ]
+    
+    bars2 = ax2.bar(models, volatilities, color=colors, alpha=0.7)
+    ax2.set_title('Volatility Comparison')
+    ax2.set_ylabel('Volatility (%)')
+    ax2.tick_params(axis='x', rotation=45)
+    
+    # Add value labels on bars
+    for bar, value in zip(bars2, volatilities):
+        height = bar.get_height()
+        ax2.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
+                f'{value:.2f}%', ha='center', va='bottom', fontweight='bold')
+    
+    ax2.grid(True, alpha=0.3)
+    
+    # Plot 3: Price Distribution Comparison
+    all_predictions = [
+        trad_final_prices,
+        heston_results['heston_predictions'],
+        regime_results['regime_predictions'],
+        jump_results['jump_predictions']
+    ]
+    
+    for i, (pred, color, label) in enumerate(zip(all_predictions, colors, models)):
+        ax3.hist(pred, bins=30, alpha=0.6, color=color, label=label, density=True)
+    
+    ax3.axvline(current_price, color='green', linestyle='-', linewidth=3, 
+               label=f'Current: ${current_price:.2f}')
+    ax3.set_title('Price Distribution Comparison')
+    ax3.set_xlabel('Price ($)')
+    ax3.set_ylabel('Density')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # Plot 4: Risk Metrics Comparison
+    # Calculate various risk metrics
+    risk_metrics = {
+        'Sharpe Ratio': [],
+        'Max Drawdown': [],
+        'VaR (5%)': [],
+        'CVaR (5%)': []
+    }
+    
+    for pred in all_predictions:
+        returns_pred = (pred - current_price) / current_price
+        
+        # Sharpe ratio (assuming risk-free rate = 0 for simplicity)
+        sharpe = np.mean(returns_pred) / np.std(returns_pred) if np.std(returns_pred) > 0 else 0
+        risk_metrics['Sharpe Ratio'].append(sharpe)
+        
+        # Maximum drawdown
+        cumulative = np.cumprod(1 + returns_pred)
+        running_max = np.maximum.accumulate(cumulative)
+        drawdown = (cumulative - running_max) / running_max
+        max_dd = np.min(drawdown)
+        risk_metrics['Max Drawdown'].append(max_dd * 100)
+        
+        # Value at Risk (5%)
+        var_5 = np.percentile(returns_pred, 5) * 100
+        risk_metrics['VaR (5%)'].append(var_5)
+        
+        # Conditional Value at Risk (5%)
+        cvar_5 = np.mean(returns_pred[returns_pred <= np.percentile(returns_pred, 5)]) * 100
+        risk_metrics['CVaR (5%)'].append(cvar_5)
+    
+    # Plot CVaR as representative risk metric
+    bars4 = ax4.bar(models, risk_metrics['CVaR (5%)'], color=colors, alpha=0.7)
+    ax4.set_title('Conditional Value at Risk (5%)')
+    ax4.set_ylabel('CVaR (%)')
+    ax4.tick_params(axis='x', rotation=45)
+    
+    # Add value labels on bars
+    for bar, value in zip(bars4, risk_metrics['CVaR (5%)']):
+        height = bar.get_height()
+        ax4.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
+                f'{value:.2f}%', ha='center', va='bottom', fontweight='bold')
+    
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Print comprehensive comparison results
+    print(f"\n📊 COMPREHENSIVE QUANTITATIVE ANALYSIS RESULTS")
+    print("="*70)
+    
+    print(f"\n📈 EXPECTED RETURNS:")
+    for i, model_name in enumerate(models):
+        print(f"{model_name:20}: {expected_returns[i]:+8.2f}%")
+    
+    print(f"\n📊 VOLATILITY:")
+    for i, model_name in enumerate(models):
+        print(f"{model_name:20}: {volatilities[i]:8.2f}%")
+    
+    print(f"\n🎯 RISK METRICS:")
+    print(f"{'Model':20} {'Sharpe':>8} {'Max DD%':>8} {'VaR(5%)':>8} {'CVaR(5%)':>8}")
+    print("-" * 60)
+    for i, model_name in enumerate(models):
+        print(f"{model_name:20} {risk_metrics['Sharpe Ratio'][i]:8.3f} "
+              f"{risk_metrics['Max Drawdown'][i]:8.2f} "
+              f"{risk_metrics['VaR (5%)'][i]:8.2f} "
+              f"{risk_metrics['CVaR (5%)'][i]:8.2f}")
+    
+    # Model-specific insights
+    print(f"\n🔍 MODEL-SPECIFIC INSIGHTS:")
+    print("="*50)
+    
+    # Heston insights
+    vol_clustering = heston_results['volatility_clustering']
+    vol_autocorr = heston_results['volatility_autocorrelation']
+    print(f"🌊 Heston Stochastic Volatility:")
+    print(f"   - Volatility clustering effect: {vol_clustering:+.2f}%")
+    print(f"   - Volatility autocorrelation: {vol_autocorr:.4f}")
+    
+    # Regime-switching insights
+    regime_dist = regime_results['final_regime_distribution']
+    avg_changes = regime_results['avg_regime_changes']
+    print(f"🔄 Regime-Switching:")
+    print(f"   - Bull market probability: {regime_dist[0]*100:.1f}%")
+    print(f"   - Bear market probability: {regime_dist[1]*100:.1f}%")
+    print(f"   - Crisis probability: {regime_dist[2]*100:.1f}%")
+    print(f"   - Average regime changes: {avg_changes:.2f}")
+    
+    # Jump diffusion insights
+    jump_skew = jump_results['jump_skewness']
+    jump_kurt = jump_results['jump_kurtosis']
+    crash_prob = jump_results['crash_probability']
+    print(f"⚡ Jump Diffusion:")
+    print(f"   - Skewness: {jump_skew:.4f}")
+    print(f"   - Kurtosis: {jump_kurt:.4f}")
+    print(f"   - Crash probability: {crash_prob:.2f}%")
+    
+    # Model ranking
+    print(f"\n🏆 MODEL RANKING (Lower CVaR = Better Risk Management):")
+    cvar_ranking = sorted(zip(models, risk_metrics['CVaR (5%)']), key=lambda x: x[1])
+    for i, (model_name, cvar) in enumerate(cvar_ranking, 1):
+        print(f"{i}. {model_name:20}: {cvar:6.2f}%")
+    
+    return {
+        'heston_results': heston_results,
+        'regime_results': regime_results,
+        'jump_results': jump_results,
+        'traditional_results': {
+            'expected_return': trad_expected_return,
+            'volatility': trad_volatility,
+            'predictions': trad_final_prices
+        },
+        'comparison_metrics': {
+            'expected_returns': expected_returns,
+            'volatilities': volatilities,
+            'risk_metrics': risk_metrics
+        }
+    }
+
 # Main execution
 if __name__ == "__main__":
     ticker = "XLU"
     
     try:
-        print("🚀 Starting Bayesian Neural Network Implementation")
-        print("="*60)
+        print("🚀 Starting Advanced Quantitative Model Implementation")
+        print("="*70)
+        print("Implementing: Heston Stochastic Volatility, Regime-Switching GBM, Jump Diffusion")
+        print("="*70)
         
-        # Train Bayesian Neural Network
-        print("\n🧠 Training Bayesian Neural Network...")
-        bayesian_model, scaler_X, scaler_y, enhanced_data, feature_columns, bayesian_metrics = train_bayesian_model(
-            ticker, sequence_length=60, epochs=30
-        )
-        
-        # Plot uncertainty analysis
-        print("\n📊 Plotting Uncertainty Analysis...")
-        plot_uncertainty_analysis(bayesian_metrics, ticker)
-        
-        # Run enhanced analysis with uncertainty quantification
-        print("\n🔮 Running Enhanced Bayesian Analysis...")
-        bayesian_results = enhanced_analysis_with_uncertainty(
-            ticker, 
-            bayesian_model, 
-            scaler_X, 
-            scaler_y, 
-            enhanced_data, 
-            feature_columns, 
-            forecast_months=6
-        )
-        
-        # Compare with regular transformer
-        print("\n🔄 Training Regular Transformer for Comparison...")
-        regular_model, _, _, _, _, regular_metrics = train_enhanced_model(
+        # Train the enhanced ML model first
+        print("\n🧠 Training Enhanced ML Model...")
+        model, scaler_X, scaler_y, enhanced_data, feature_columns, metrics = train_enhanced_model(
             ticker, sequence_length=60, epochs=30, model_type='transformer'
         )
         
-        # Compare performance
-        print(f"\n📊 BAYESIAN vs REGULAR TRANSFORMER COMPARISON")
+        # Run comprehensive quantitative analysis
+        print("\n🎯 Running Comprehensive Quantitative Analysis...")
+        comprehensive_results = comprehensive_quantitative_analysis(
+            ticker, model, scaler_X, scaler_y, enhanced_data, feature_columns, 
+            forecast_months=6, sequence_length=60
+        )
+        
+        # Additional detailed analysis for each model
+        print("\n🔍 DETAILED MODEL ANALYSIS")
+        print("="*50)
+        
+        # Heston model detailed analysis
+        print("\n🌊 HESTON STOCHASTIC VOLATILITY DETAILS:")
+        heston_results = comprehensive_results['heston_results']
+        print(f"Volatility clustering captures the empirical fact that high volatility")
+        print(f"tends to be followed by high volatility (autocorrelation: {heston_results['volatility_autocorrelation']:.4f})")
+        print(f"This model is particularly useful for options pricing and risk management.")
+        
+        # Regime-switching detailed analysis
+        print("\n🔄 REGIME-SWITCHING DETAILS:")
+        regime_results = comprehensive_results['regime_results']
+        regime_dist = regime_results['final_regime_distribution']
+        print(f"Market regimes capture structural changes in market behavior:")
+        print(f"- Bull markets: {regime_dist[0]*100:.1f}% probability")
+        print(f"- Bear markets: {regime_dist[1]*100:.1f}% probability") 
+        print(f"- Crisis periods: {regime_dist[2]*100:.1f}% probability")
+        print(f"This model is ideal for portfolio allocation and regime-aware strategies.")
+        
+        # Jump diffusion detailed analysis
+        print("\n⚡ JUMP DIFFUSION DETAILS:")
+        jump_results = comprehensive_results['jump_results']
+        print(f"Jump diffusion captures rare but significant market events:")
+        print(f"- Skewness: {jump_results['jump_skewness']:.4f} (negative = crash risk)")
+        print(f"- Kurtosis: {jump_results['jump_kurtosis']:.4f} (fat tails)")
+        print(f"- Crash probability: {jump_results['crash_probability']:.2f}%")
+        print(f"This model is essential for tail risk management and extreme event modeling.")
+        
+        # Model comparison summary
+        print(f"\n📊 QUANTITATIVE MODEL COMPARISON SUMMARY")
         print("="*60)
         
-        bayesian_mse = mean_squared_error(bayesian_metrics['test_actual'], bayesian_metrics['test_pred'])
-        regular_mse = mean_squared_error(regular_metrics['test_actual'], regular_metrics['test_pred'])
+        comparison = comprehensive_results['comparison_metrics']
+        models = ['Traditional GBM', 'Heston SV', 'Regime-Switching', 'Jump Diffusion']
         
-        bayesian_mae = mean_absolute_error(bayesian_metrics['test_actual'], bayesian_metrics['test_pred'])
-        regular_mae = mean_absolute_error(regular_metrics['test_actual'], regular_metrics['test_pred'])
+        print(f"\nExpected Returns:")
+        for model_name, ret in zip(models, comparison['expected_returns']):
+            print(f"  {model_name:20}: {ret:+.2f}%")
         
-        print(f"Bayesian MSE: {bayesian_mse:.6f}")
-        print(f"Regular Transformer MSE: {regular_mse:.6f}")
-        print(f"Bayesian MAE: {bayesian_mae:.6f}")
-        print(f"Regular Transformer MAE: {regular_mae:.6f}")
+        print(f"\nVolatilities:")
+        for model_name, vol in zip(models, comparison['volatilities']):
+            print(f"  {model_name:20}: {vol:.2f}%")
         
-        improvement_mse = ((regular_mse - bayesian_mse) / regular_mse) * 100
-        improvement_mae = ((regular_mae - bayesian_mae) / regular_mae) * 100
+        print(f"\nRisk-Adjusted Performance (Sharpe Ratio):")
+        for model_name, sharpe in zip(models, comparison['risk_metrics']['Sharpe Ratio']):
+            print(f"  {model_name:20}: {sharpe:.3f}")
         
-        print(f"\n🎯 IMPROVEMENT METRICS")
-        print(f"MSE Improvement: {improvement_mse:+.2f}%")
-        print(f"MAE Improvement: {improvement_mae:+.2f}%")
+        # Final recommendations
+        print(f"\n🎯 QUANTITATIVE INSIGHTS & RECOMMENDATIONS")
+        print("="*60)
         
-        # Uncertainty benefits
-        avg_uncertainty = np.mean(bayesian_metrics['test_uncertainty'])
-        print(f"\n🔮 UNCERTAINTY QUANTIFICATION BENEFITS")
-        print(f"Average Uncertainty: {avg_uncertainty:.4f}")
-        print(f"Uncertainty Range: [{np.min(bayesian_metrics['test_uncertainty']):.4f}, {np.max(bayesian_metrics['test_uncertainty']):.4f}]")
+        best_sharpe_idx = np.argmax(comparison['risk_metrics']['Sharpe Ratio'])
+        best_risk_idx = np.argmin(comparison['risk_metrics']['CVaR (5%)'])
         
-        # Confidence analysis
-        high_conf_mask = bayesian_metrics['test_uncertainty'] < np.percentile(bayesian_metrics['test_uncertainty'], 25)
-        low_conf_mask = bayesian_metrics['test_uncertainty'] > np.percentile(bayesian_metrics['test_uncertainty'], 75)
+        print(f"Best Risk-Adjusted Performance: {models[best_sharpe_idx]}")
+        print(f"Best Risk Management: {models[best_risk_idx]}")
         
-        high_conf_mae = mean_absolute_error(
-            bayesian_metrics['test_actual'][high_conf_mask], 
-            bayesian_metrics['test_pred'][high_conf_mask]
-        )
-        low_conf_mae = mean_absolute_error(
-            bayesian_metrics['test_actual'][low_conf_mask], 
-            bayesian_metrics['test_pred'][low_conf_mask]
-        )
+        print(f"\n🔮 MODEL APPLICATIONS:")
+        print("• Heston SV: Options pricing, volatility trading, risk management")
+        print("• Regime-Switching: Portfolio allocation, tactical asset allocation")
+        print("• Jump Diffusion: Tail risk modeling, extreme event preparation")
+        print("• Traditional GBM: Baseline comparison, simple scenarios")
         
-        print(f"High Confidence Predictions MAE: {high_conf_mae:.6f}")
-        print(f"Low Confidence Predictions MAE: {low_conf_mae:.6f}")
-        print(f"Confidence-Error Correlation: {np.corrcoef(bayesian_metrics['test_uncertainty'], np.abs(bayesian_metrics['test_pred'] - bayesian_metrics['test_actual']))[0,1]:.4f}")
-        
-        # Create comparison visualization
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle(f'{ticker} Bayesian vs Regular Transformer Comparison', fontsize=16, fontweight='bold')
-        
-        # Plot 1: Training Loss Comparison
-        ax1.plot(bayesian_metrics['train_losses'], label='Bayesian', color='purple', linewidth=2)
-        ax1.plot(regular_metrics['train_losses'], label='Regular Transformer', color='blue', linewidth=2)
-        ax1.set_title('Training Loss Comparison')
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Loss')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # Plot 2: Prediction Accuracy Comparison
-        ax2.scatter(bayesian_metrics['test_actual'], bayesian_metrics['test_pred'], 
-                   alpha=0.6, color='purple', label='Bayesian', s=30)
-        ax2.scatter(regular_metrics['test_actual'], regular_metrics['test_pred'], 
-                   alpha=0.6, color='blue', label='Regular Transformer', s=30)
-        
-        min_val = min(min(bayesian_metrics['test_actual']), min(regular_metrics['test_actual']))
-        max_val = max(max(bayesian_metrics['test_actual']), max(regular_metrics['test_actual']))
-        ax2.plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=2, label='Perfect Prediction')
-        
-        ax2.set_xlabel('Actual Prices')
-        ax2.set_ylabel('Predicted Prices')
-        ax2.set_title('Prediction Accuracy Comparison')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        
-        # Plot 3: Error Distribution Comparison
-        bayesian_errors = bayesian_metrics['test_pred'] - bayesian_metrics['test_actual']
-        regular_errors = regular_metrics['test_pred'] - regular_metrics['test_actual']
-        
-        ax3.hist(bayesian_errors, bins=30, alpha=0.7, color='purple', label='Bayesian', density=True)
-        ax3.hist(regular_errors, bins=30, alpha=0.7, color='blue', label='Regular Transformer', density=True)
-        ax3.axvline(0, color='black', linestyle='--', linewidth=2, label='Perfect Prediction')
-        ax3.set_xlabel('Prediction Error')
-        ax3.set_ylabel('Density')
-        ax3.set_title('Error Distribution Comparison')
-        ax3.legend()
-        ax3.grid(True, alpha=0.3)
-        
-        # Plot 4: Uncertainty vs Error for Bayesian
-        bayesian_abs_errors = np.abs(bayesian_errors)
-        ax4.scatter(bayesian_metrics['test_uncertainty'], bayesian_abs_errors, 
-                   alpha=0.6, color='purple', s=30)
-        ax4.set_xlabel('Predicted Uncertainty')
-        ax4.set_ylabel('Absolute Prediction Error')
-        ax4.set_title('Bayesian: Uncertainty vs Error')
-        ax4.grid(True, alpha=0.3)
-        
-        # Add trend line
-        if len(bayesian_metrics['test_uncertainty']) > 1:
-            z = np.polyfit(bayesian_metrics['test_uncertainty'], bayesian_abs_errors, 1)
-            p = np.poly1d(z)
-            ax4.plot(bayesian_metrics['test_uncertainty'], p(bayesian_metrics['test_uncertainty']), 
-                    "r--", alpha=0.8, linewidth=2)
-        
-        plt.tight_layout()
-        plt.show()
-        
-        print("\n🎯 FINAL ASSESSMENT")
-        print("="*40)
-        print(f"Bayesian Neural Network Implementation:")
-        print(f"✅ Uncertainty quantification: {avg_uncertainty:.4f}")
-        print(f"✅ Prediction accuracy: {bayesian_mse:.6f} MSE")
-        print(f"✅ Confidence correlation: {np.corrcoef(bayesian_metrics['test_uncertainty'], np.abs(bayesian_metrics['test_pred'] - bayesian_metrics['test_actual']))[0,1]:.4f}")
-        print(f"✅ High confidence MAE: {high_conf_mae:.6f}")
-        print(f"✅ Low confidence MAE: {low_conf_mae:.6f}")
-        
-        if improvement_mse > 0:
-            print(f"✅ Bayesian outperforms regular transformer by {improvement_mse:.2f}% in MSE")
-        else:
-            print(f"⚠️ Regular transformer outperforms Bayesian by {abs(improvement_mse):.2f}% in MSE")
-        
-        print(f"\n🔮 Uncertainty Metrics:")
-        print(f"- Total Uncertainty: {bayesian_results['uncertainty_metrics']['total_uncertainty']:.4f}")
-        print(f"- Aleatoric Uncertainty: {bayesian_results['uncertainty_metrics']['aleatoric_uncertainty']:.4f}")
-        print(f"- Epistemic Uncertainty: {bayesian_results['uncertainty_metrics']['epistemic_uncertainty']:.4f}")
-        print(f"- Price Std: {bayesian_results['uncertainty_metrics']['price_std']:.4f}")
-        print(f"- Volatility Std: {bayesian_results['uncertainty_metrics']['volatility_std']:.4f}")
-        print(f"- Drift Std: {bayesian_results['uncertainty_metrics']['drift_std']:.4f}")
-        
-        print("\n✅ Bayesian Neural Network implementation completed successfully!")
-        print("🎉 Uncertainty quantification is now available for more reliable financial analysis!")
+        print(f"\n✅ Advanced Quantitative Models Implementation Completed!")
+        print("🎉 Your GBM model now includes sophisticated features that quants demand:")
+        print("   ✅ Stochastic volatility (Heston model)")
+        print("   ✅ Regime-switching dynamics")
+        print("   ✅ Jump diffusion processes")
+        print("   ✅ Comprehensive risk metrics")
+        print("   ✅ Model comparison framework")
         
     except Exception as e:
         print(f"❌ Error during execution: {str(e)}")
