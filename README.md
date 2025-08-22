@@ -127,7 +127,7 @@ A sophisticated implementation of Geometric Brownian Motion (GBM) enhanced with 
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/GeometricBrownianMotion.git
+git clone https://github.com/YavuzAkbay/GeometricBrownianMotion.git
 cd GeometricBrownianMotion
 
 # Install dependencies
