@@ -203,12 +203,12 @@ python -c "from enhanced_gbm import compare_models_for_stock; compare_models_for
 
 ## 📊 Project Statistics
 
-![GitHub stars](https://img.shields.io/github/stars/yourusername/GeometricBrownianMotion?style=social)
-![GitHub forks](https://img.shields.io/github/forks/yourusername/GeometricBrownianMotion?style=social)
-![GitHub issues](https://img.shields.io/github/issues/yourusername/GeometricBrownianMotion)
-![GitHub pull requests](https://img.shields.io/github/issues-pr/yourusername/GeometricBrownianMotion)
-![GitHub contributors](https://img.shields.io/github/contributors/yourusername/GeometricBrownianMotion)
-![GitHub last commit](https://img.shields.io/github/last-commit/yourusername/GeometricBrownianMotion)
+![GitHub stars](https://img.shields.io/github/stars/YavuzAkbay/GeometricBrownianMotion?style=social)
+![GitHub forks](https://img.shields.io/github/forks/YavuzAkbay/GeometricBrownianMotion?style=social)
+![GitHub issues](https://img.shields.io/github/issues/YavuzAkbay/GeometricBrownianMotion)
+![GitHub pull requests](https://img.shields.io/github/issues-pr/YavuzAkbay/GeometricBrownianMotion)
+![GitHub contributors](https://img.shields.io/github/contributors/YavuzAkbay/GeometricBrownianMotion)
+![GitHub last commit](https://img.shields.io/github/last-commit/YavuzAkbay/GeometricBrownianMotion)
 
 ## 🔍 Enhanced Explainability & Transparency Features
 
