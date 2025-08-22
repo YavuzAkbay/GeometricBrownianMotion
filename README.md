@@ -1,6 +1,39 @@
 # Geometric Brownian Motion with Advanced Quantitative Models & Options Pricing
 
+[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE.TXT)
+[![PyTorch](https://img.shields.io/badge/PyTorch-1.9+-red.svg)](https://pytorch.org/)
+[![SHAP](https://img.shields.io/badge/SHAP-Explainable%20AI-orange.svg)](https://github.com/slundberg/shap)
+[![Status](https://img.shields.io/badge/Status-Production%20Ready-brightgreen.svg)]()
+
 A sophisticated implementation of Geometric Brownian Motion (GBM) enhanced with Machine Learning predictions, advanced quantitative models, comprehensive options pricing & risk metrics, and **explainability & transparency features** that quants demand.
+
+## 👨‍💻 Author
+
+**Yavuz** - Quantitative Finance Developer & ML Engineer
+
+- 🔗 **LinkedIn**: [https://www.linkedin.com/in/yavuzakbay/]
+- 📧 **Email**: [akbay.yavuz@gmail.com]
+- 🐙 **GitHub**: [https://github.com/YavuzAkbay]
+
+## 📋 Table of Contents
+
+- [🌟 Key Features](#-key-features)
+- [🚀 Quick Start](#-quick-start)
+- [🔍 Enhanced Explainability & Transparency Features](#-enhanced-explainability--transparency-features)
+- [🎯 Advanced Options Pricing & Risk Management](#-advanced-options-pricing--risk-management)
+- [📈 Enhanced Model Comparison](#-enhanced-model-comparison)
+- [🎯 Enhanced Explainability Insights for Risk Managers](#-enhanced-explainability-insights-for-risk-managers)
+- [🎯 Advanced Options Pricing Features](#-advanced-options-pricing-features)
+- [🔬 Advanced Features](#-advanced-features)
+- [📊 Enhanced Risk Analysis](#-enhanced-risk-analysis)
+- [🎯 Enhanced Quantitative Insights](#-enhanced-quantitative-insights)
+- [🔮 Enhanced Applications](#-enhanced-applications)
+- [📈 Enhanced Performance](#-enhanced-performance)
+- [🛠️ Technical Details](#️-technical-details)
+- [📚 References](#-references)
+- [🤝 Contributing](#-contributing)
+- [📄 License](#-license)
 
 ## 🌟 Key Features
 
@@ -84,9 +117,24 @@ A sophisticated implementation of Geometric Brownian Motion (GBM) enhanced with 
 
 ## 🚀 Quick Start
 
+### Prerequisites
+
+- Python 3.8 or higher
+- Basic knowledge of quantitative finance concepts
+- Familiarity with PyTorch and pandas
+
 ### Installation
+
 ```bash
+# Clone the repository
+git clone https://github.com/yourusername/GeometricBrownianMotion.git
+cd GeometricBrownianMotion
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Verify installation
+python -c "import torch, numpy, pandas; print('✅ All dependencies installed successfully!')"
 ```
 
 ### Basic Usage
@@ -152,6 +200,15 @@ python enhanced_gbm.py
 # Quick model comparison
 python -c "from enhanced_gbm import compare_models_for_stock; compare_models_for_stock('AAPL')"
 ```
+
+## 📊 Project Statistics
+
+![GitHub stars](https://img.shields.io/github/stars/yourusername/GeometricBrownianMotion?style=social)
+![GitHub forks](https://img.shields.io/github/forks/yourusername/GeometricBrownianMotion?style=social)
+![GitHub issues](https://img.shields.io/github/issues/yourusername/GeometricBrownianMotion)
+![GitHub pull requests](https://img.shields.io/github/issues-pr/yourusername/GeometricBrownianMotion)
+![GitHub contributors](https://img.shields.io/github/contributors/yourusername/GeometricBrownianMotion)
+![GitHub last commit](https://img.shields.io/github/last-commit/yourusername/GeometricBrownianMotion)
 
 ## 🔍 Enhanced Explainability & Transparency Features
 
@@ -687,12 +744,41 @@ The advanced models typically show:
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+We welcome contributions! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+
+### How to Contribute
+
+1. **Fork the repository**
+2. **Create a feature branch** (`git checkout -b feature/AmazingFeature`)
+3. **Commit your changes** (`git commit -m 'Add some AmazingFeature'`)
+4. **Push to the branch** (`git push origin feature/AmazingFeature`)
+5. **Open a Pull Request**
+
+### Contribution Guidelines
+
+- Please ensure your code follows PEP 8 style guidelines
+- Add tests for new functionality
+- Update documentation for any new features
+- Ensure all tests pass before submitting
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License - see the [LICENSE.TXT](LICENSE.TXT) file for details.
+
+## 🙏 Acknowledgments
+
+- **Academic Community**: For the foundational research in stochastic processes and options pricing
+- **Open Source Community**: For the excellent libraries that make this project possible
+- **Financial Industry**: For the real-world applications and feedback that drive improvements
+
+## 📞 Contact & Support
+
+- **Email**: [akbay.yavuz@gmail.com]
+- **LinkedIn**: [https://www.linkedin.com/in/yavuzakbay/]
+- **GitHub Issues**: [Create an issue](https://github.com/YavuzAkbay/GeometricBrownianMotion/issues)
 
 ---
 
 **🎉 Your GBM model now includes sophisticated features that quants demand, including comprehensive options pricing, risk metrics, and enhanced explainability & transparency features!**
+
+**⭐ If you find this project useful, please consider giving it a star on GitHub!**
