@@ -1,7 +1,7 @@
 # Geometric Brownian Motion with Advanced Quantitative Models & Options Pricing
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE.TXT)
+[![License](https://img.shields.io/badge/license-%20%20GNU%20GPLv3%20-green?style=plastic)](LICENSE.TXT)
 [![PyTorch](https://img.shields.io/badge/PyTorch-1.9+-red.svg)](https://pytorch.org/)
 [![SHAP](https://img.shields.io/badge/SHAP-Explainable%20AI-orange.svg)](https://github.com/slundberg/shap)
 [![Status](https://img.shields.io/badge/Status-Production%20Ready-brightgreen.svg)]()
