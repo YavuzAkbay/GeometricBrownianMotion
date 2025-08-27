@@ -10,7 +10,7 @@ A sophisticated implementation of Geometric Brownian Motion (GBM) enhanced with 
 
 ## 👨‍💻 Author
 
-**Yavuz** - Quantitative Finance Developer & ML Engineer
+**Yavuz** - Quantitative Analyst
 
 - 🔗 **LinkedIn**: [https://www.linkedin.com/in/yavuzakbay/]
 - 📧 **Email**: [akbay.yavuz@gmail.com]
