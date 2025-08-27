@@ -1,7 +1,7 @@
 # Geometric Brownian Motion with Advanced Quantitative Models & Options Pricing
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE.TXT)
+[![License](https://img.shields.io/static/v1?label=license&message=GPL-3.0)](LICENSE.TXT)
 [![PyTorch](https://img.shields.io/badge/PyTorch-1.9+-red.svg)](https://pytorch.org/)
 [![SHAP](https://img.shields.io/badge/SHAP-Explainable%20AI-orange.svg)](https://github.com/slundberg/shap)
 [![Status](https://img.shields.io/badge/Status-Production%20Ready-brightgreen.svg)]()
@@ -10,7 +10,7 @@ A sophisticated implementation of Geometric Brownian Motion (GBM) enhanced with 
 
 ## 👨‍💻 Author
 
-**Yavuz** - Quantitative Finance Developer & ML Engineer
+**Yavuz** - Quantitative Analyst
 
 - 🔗 **LinkedIn**: [https://www.linkedin.com/in/yavuzakbay/]
 - 📧 **Email**: [akbay.yavuz@gmail.com]
@@ -127,7 +127,7 @@ A sophisticated implementation of Geometric Brownian Motion (GBM) enhanced with 
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/GeometricBrownianMotion.git
+git clone https://github.com/YavuzAkbay/GeometricBrownianMotion.git
 cd GeometricBrownianMotion
 
 # Install dependencies
@@ -203,12 +203,12 @@ python -c "from enhanced_gbm import compare_models_for_stock; compare_models_for
 
 ## 📊 Project Statistics
 
-![GitHub stars](https://img.shields.io/github/stars/yourusername/GeometricBrownianMotion?style=social)
-![GitHub forks](https://img.shields.io/github/forks/yourusername/GeometricBrownianMotion?style=social)
-![GitHub issues](https://img.shields.io/github/issues/yourusername/GeometricBrownianMotion)
-![GitHub pull requests](https://img.shields.io/github/issues-pr/yourusername/GeometricBrownianMotion)
-![GitHub contributors](https://img.shields.io/github/contributors/yourusername/GeometricBrownianMotion)
-![GitHub last commit](https://img.shields.io/github/last-commit/yourusername/GeometricBrownianMotion)
+![GitHub stars](https://img.shields.io/github/stars/YavuzAkbay/GeometricBrownianMotion?style=social)
+![GitHub forks](https://img.shields.io/github/forks/YavuzAkbay/GeometricBrownianMotion?style=social)
+![GitHub issues](https://img.shields.io/github/issues/YavuzAkbay/GeometricBrownianMotion)
+![GitHub pull requests](https://img.shields.io/github/issues-pr/YavuzAkbay/GeometricBrownianMotion)
+![GitHub contributors](https://img.shields.io/github/contributors/YavuzAkbay/GeometricBrownianMotion)
+![GitHub last commit](https://img.shields.io/github/last-commit/YavuzAkbay/GeometricBrownianMotion)
 
 ## 🔍 Enhanced Explainability & Transparency Features
 
@@ -763,7 +763,7 @@ We welcome contributions! Please feel free to submit a Pull Request. For major c
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE.TXT](LICENSE.TXT) file for details.
+This project is licensed under the GNU GPLv3 License - see the [LICENSE.TXT](LICENSE.TXT) file for details.
 
 ## 🙏 Acknowledgments
 
