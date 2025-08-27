@@ -299,10 +299,7 @@ def visualize_shap_analysis(shap_results, sample_indices=None, num_samples=10):
         axes[0,0].set_title('Feature Importance (SHAP)', fontsize=14)
         axes[0,0].grid(True, alpha=0.3)
         
-        # Add value annotations
-        for i, (bar, importance) in enumerate(zip(bars, sorted_importance)):
-            axes[0,0].text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2, 
-                          f'{importance:.3f}', va='center', fontsize=9)
+        # Value annotations removed as requested
         
     except Exception as e:
         axes[0,0].text(0.5, 0.5, f'SHAP Feature Importance\nError: {str(e)}', 
@@ -326,12 +323,7 @@ def visualize_shap_analysis(shap_results, sample_indices=None, num_samples=10):
         axes[0,1].grid(True, alpha=0.3)
         axes[0,1].axvline(x=0, color='black', linestyle='-', alpha=0.5)
         
-        # Add value annotations
-        for bar, val in zip(bars, sample_shap[sorted_idx]):
-            axes[0,1].text(bar.get_width() + (0.01 if bar.get_width() >= 0 else -0.01), 
-                          bar.get_y() + bar.get_height()/2, 
-                          f'{val:.3f}', va='center', fontsize=9, 
-                          ha='left' if bar.get_width() >= 0 else 'right')
+        # Value annotations removed as requested
             
     except Exception as e:
         axes[0,1].text(0.5, 0.5, f'SHAP Sample Analysis\nError: {str(e)}', 
@@ -445,10 +437,7 @@ def create_attention_visualization(model, X, feature_names, sample_indices=None,
         axes[row, col].set_xlabel('Attention Weight')
         axes[row, col].set_title(f'Sample {idx} - Top Feature Importance')
         
-        # Add value annotations on bars
-        for j, (bar, weight) in enumerate(zip(bars, top_weights)):
-            axes[row, col].text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2, 
-                               f'{weight:.3f}', va='center', fontsize=7)
+        # Value annotations removed as requested
         
         # Color bars by feature value (normalized)
         feature_values_norm = (feature_values[top_features] - feature_values[top_features].min()) / \
@@ -540,10 +529,7 @@ def create_attention_heatmap(model, X, feature_names, num_samples=20):
     ax2.set_xlabel('Average Attention Weight')
     ax2.set_title('Feature Importance (Mean ± Std across samples)')
     
-    # Add value annotations
-    for i, (bar, mean_val, std_val) in enumerate(zip(bars, mean_attention, std_attention)):
-        ax2.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2, 
-                f'{mean_val:.3f}±{std_val:.3f}', va='center', fontsize=7)
+    # Value annotations removed as requested
     
     plt.tight_layout()
     
