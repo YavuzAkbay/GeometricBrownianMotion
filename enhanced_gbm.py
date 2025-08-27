@@ -36,7 +36,69 @@ from sklearn.calibration import calibration_curve
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+import os
+import json
+from datetime import datetime
 warnings.filterwarnings('ignore')
+
+# Create output directory structure
+def create_output_directories():
+    """Create output directories for saving plots and data"""
+    base_dir = "output"
+    subdirs = ["plots", "data", "reports"]
+    
+    for subdir in subdirs:
+        os.makedirs(os.path.join(base_dir, subdir), exist_ok=True)
+    
+    return base_dir
+
+# Initialize output directories
+OUTPUT_DIR = create_output_directories()
+
+def save_plot(fig, filename, subdir="plots"):
+    """Save matplotlib figure as PNG file"""
+    filepath = os.path.join(OUTPUT_DIR, subdir, f"{filename}.png")
+    fig.savefig(filepath, dpi=400, bbox_inches='tight', facecolor='white')
+    plt.close(fig)  # Close the figure to free memory
+    print(f"📊 Plot saved: {filepath}")
+    return filepath
+
+def save_data(data, filename, subdir="data"):
+    """Save data as JSON file"""
+    filepath = os.path.join(OUTPUT_DIR, subdir, f"{filename}.json")
+    
+    # Convert numpy arrays to lists for JSON serialization
+    def convert_for_json(obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, dict):
+            return {k: convert_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_for_json(item) for item in obj]
+        else:
+            return obj
+    
+    json_data = convert_for_json(data)
+    
+    with open(filepath, 'w') as f:
+        json.dump(json_data, f, indent=2, default=str)
+    
+    print(f"📄 Data saved: {filepath}")
+    return filepath
+
+def save_report(report_text, filename, subdir="reports"):
+    """Save text report as TXT file"""
+    filepath = os.path.join(OUTPUT_DIR, subdir, f"{filename}.txt")
+    
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(report_text)
+    
+    print(f"📋 Report saved: {filepath}")
+    return filepath
 
 # Import the advanced model functions from the main gbm.py file
 from gbm import (
@@ -215,9 +277,9 @@ def visualize_shap_analysis(shap_results, sample_indices=None, num_samples=10):
     if sample_indices is None:
         sample_indices = np.random.choice(len(drift_shap), num_samples, replace=False)
     
-    # Create subplots
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle('SHAP Analysis for Enhanced GBM Model', fontsize=16, fontweight='bold')
+    # Create subplots with larger figure size
+    fig, axes = plt.subplots(2, 2, figsize=(20, 16))
+    fig.suptitle('SHAP Analysis for Enhanced GBM Model', fontsize=18, fontweight='bold')
     
     # Ensure drift_shap is a numpy array
     if isinstance(drift_shap, torch.Tensor):
@@ -232,15 +294,15 @@ def visualize_shap_analysis(shap_results, sample_indices=None, num_samples=10):
         
         bars = axes[0,0].barh(range(len(sorted_features)), sorted_importance, color='skyblue')
         axes[0,0].set_yticks(range(len(sorted_features)))
-        axes[0,0].set_yticklabels(sorted_features, fontsize=8)
-        axes[0,0].set_xlabel('Mean |SHAP Value|')
-        axes[0,0].set_title('Feature Importance (SHAP)')
+        axes[0,0].set_yticklabels(sorted_features, fontsize=10)
+        axes[0,0].set_xlabel('Mean |SHAP Value|', fontsize=12)
+        axes[0,0].set_title('Feature Importance (SHAP)', fontsize=14)
         axes[0,0].grid(True, alpha=0.3)
         
         # Add value annotations
         for i, (bar, importance) in enumerate(zip(bars, sorted_importance)):
             axes[0,0].text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2, 
-                          f'{importance:.3f}', va='center', fontsize=7)
+                          f'{importance:.3f}', va='center', fontsize=9)
         
     except Exception as e:
         axes[0,0].text(0.5, 0.5, f'SHAP Feature Importance\nError: {str(e)}', 
@@ -258,9 +320,9 @@ def visualize_shap_analysis(shap_results, sample_indices=None, num_samples=10):
         
         bars = axes[0,1].barh(y_pos, sample_shap[sorted_idx], color=colors, alpha=0.7)
         axes[0,1].set_yticks(y_pos)
-        axes[0,1].set_yticklabels([feature_names[i] for i in sorted_idx], fontsize=8)
-        axes[0,1].set_xlabel('SHAP Value')
-        axes[0,1].set_title(f'SHAP Values for Sample {sample_idx}')
+        axes[0,1].set_yticklabels([feature_names[i] for i in sorted_idx], fontsize=10)
+        axes[0,1].set_xlabel('SHAP Value', fontsize=12)
+        axes[0,1].set_title(f'SHAP Values for Sample {sample_idx}', fontsize=14)
         axes[0,1].grid(True, alpha=0.3)
         axes[0,1].axvline(x=0, color='black', linestyle='-', alpha=0.5)
         
@@ -268,7 +330,7 @@ def visualize_shap_analysis(shap_results, sample_indices=None, num_samples=10):
         for bar, val in zip(bars, sample_shap[sorted_idx]):
             axes[0,1].text(bar.get_width() + (0.01 if bar.get_width() >= 0 else -0.01), 
                           bar.get_y() + bar.get_height()/2, 
-                          f'{val:.3f}', va='center', fontsize=7, 
+                          f'{val:.3f}', va='center', fontsize=9, 
                           ha='left' if bar.get_width() >= 0 else 'right')
             
     except Exception as e:
@@ -287,9 +349,9 @@ def visualize_shap_analysis(shap_results, sample_indices=None, num_samples=10):
             patch.set_facecolor('lightblue')
             patch.set_alpha(0.7)
         
-        axes[1,0].set_xlabel('SHAP Value')
-        axes[1,0].set_title('SHAP Value Distribution Across Samples')
-        axes[1,0].tick_params(axis='y', labelsize=8)
+        axes[1,0].set_xlabel('SHAP Value', fontsize=12)
+        axes[1,0].set_title('SHAP Value Distribution Across Samples', fontsize=14)
+        axes[1,0].tick_params(axis='y', labelsize=10)
         axes[1,0].grid(True, alpha=0.3)
         axes[1,0].axvline(x=0, color='black', linestyle='-', alpha=0.5)
         
@@ -306,11 +368,11 @@ def visualize_shap_analysis(shap_results, sample_indices=None, num_samples=10):
         # Create a scatter plot showing correlation
         feature_shap = drift_shap[:, most_important_idx]
         
-        axes[1,1].scatter(range(len(feature_shap)), feature_shap, alpha=0.6, s=30, color='green')
+        axes[1,1].scatter(range(len(feature_shap)), feature_shap, alpha=0.6, s=50, color='green')
         axes[1,1].axhline(y=0, color='black', linestyle='-', alpha=0.5)
-        axes[1,1].set_xlabel('Sample Index')
-        axes[1,1].set_ylabel('SHAP Value')
-        axes[1,1].set_title(f'SHAP Values Over Samples: {most_important_feature}')
+        axes[1,1].set_xlabel('Sample Index', fontsize=12)
+        axes[1,1].set_ylabel('SHAP Value', fontsize=12)
+        axes[1,1].set_title(f'SHAP Values Over Samples: {most_important_feature}', fontsize=14)
         axes[1,1].grid(True, alpha=0.3)
         
         # Add trend line
@@ -324,7 +386,10 @@ def visualize_shap_analysis(shap_results, sample_indices=None, num_samples=10):
         axes[1,1].set_title('SHAP Feature Analysis - Error')
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot instead of showing it
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"shap_analysis_{timestamp}")
     
     return fig
 
@@ -398,7 +463,10 @@ def create_attention_visualization(model, X, feature_names, sample_indices=None,
             fig.delaxes(axes[row, col])
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot instead of showing it
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"attention_visualization_{timestamp}")
     
     # Create summary statistics
     print(f"\n📊 Attention Analysis Summary:")
@@ -478,7 +546,10 @@ def create_attention_heatmap(model, X, feature_names, num_samples=20):
                 f'{mean_val:.3f}±{std_val:.3f}', va='center', fontsize=7)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot instead of showing it
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"attention_heatmap_{timestamp}")
     
     return fig
 
@@ -568,7 +639,10 @@ def analyze_attention_stability(model, X, feature_names, num_samples=50):
     ax4.set_title('Feature Attention Stability')
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot instead of showing it
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"attention_stability_analysis_{timestamp}")
     
     # Print stability summary
     print(f"\n📊 Attention Stability Summary:")
@@ -751,7 +825,10 @@ def compare_attention_with_other_methods(model, X, feature_names, num_samples=10
     ax4.set_title('Feature Importance Method Agreement')
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot instead of showing it
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"method_comparison_{timestamp}")
     
     # Print comparison summary
     print(f"\n📊 Method Comparison Summary:")
@@ -818,7 +895,10 @@ def create_regime_heatmap(regime_predictions, time_index, confidence_scores=None
         ax2.set_ylim(0, 1)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot instead of showing it
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"regime_heatmap_{timestamp}")
     
     return fig
 
@@ -940,7 +1020,10 @@ def visualize_confidence_analysis(confidence_metrics, predictions, confidence_sc
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot instead of showing it
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"confidence_analysis_{timestamp}")
     
     return fig
 
@@ -1002,7 +1085,10 @@ def create_feature_importance_analysis(model, X, feature_names, method='shap'):
     ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot instead of showing it
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"feature_importance_{method}_{timestamp}")
     
     return {
         'importance_scores': importance_scores,
@@ -1011,9 +1097,52 @@ def create_feature_importance_analysis(model, X, feature_names, method='shap'):
         'cumulative_importance': cumulative_importance
     }
 
-def generate_explainability_report(model, X, y_true, feature_names, ticker="STOCK"):
+def create_feature_importance_analysis_no_plot(model, X, feature_names, method='shap'):
     """
-    Generate comprehensive explainability report
+    Create feature importance analysis using different methods (data only, no plots)
+    
+    Parameters:
+    - model: Trained model
+    - X: Input features
+    - feature_names: Names of features
+    - method: 'shap', 'permutation', or 'correlation'
+    
+    Returns:
+    - Dictionary with feature importance results
+    """
+    print(f"📊 Creating feature importance analysis using {method} method...")
+    
+    if method == 'shap':
+        # Use SHAP values for feature importance
+        shap_results = calculate_shap_values(model, X, feature_names)
+        drift_shap = shap_results['drift_shap']
+        
+        if isinstance(drift_shap, torch.Tensor):
+            drift_shap = drift_shap.detach().numpy()
+        
+        # Calculate mean absolute SHAP values
+        mean_abs_shap = np.abs(drift_shap).mean(0)
+        sorted_indices = np.argsort(mean_abs_shap)[::-1]
+        sorted_features = [feature_names[i] for i in sorted_indices]
+        sorted_scores = mean_abs_shap[sorted_indices]
+        
+        # Calculate cumulative importance
+        cumulative_importance = np.cumsum(sorted_scores) / np.sum(sorted_scores)
+        
+        # Find number of features for 80% importance
+        features_for_80 = np.argmax(cumulative_importance >= 0.8) + 1
+        
+        return {
+            'method': method,
+            'sorted_features': sorted_features,
+            'sorted_scores': sorted_scores,
+            'cumulative_importance': cumulative_importance,
+            'features_for_80_percent': features_for_80
+        }
+
+def generate_explainability_report_no_plots(model, X, y_true, feature_names, ticker="STOCK"):
+    """
+    Generate comprehensive explainability report without creating duplicate plots
     
     Parameters:
     - model: Trained model
@@ -1027,21 +1156,16 @@ def generate_explainability_report(model, X, y_true, feature_names, ticker="STOC
     """
     print(f"📋 Generating comprehensive explainability report for {ticker}...")
     
-    # 1. SHAP Analysis
+    # 1. SHAP Analysis (data only, no plots)
     print("🔍 Step 1: SHAP Analysis")
     shap_results = calculate_shap_values(model, X, feature_names)
-    shap_fig = visualize_shap_analysis(shap_results)
     
-    # 2. Attention Visualization
-    print("👁️ Step 2: Attention Mechanism Analysis")
-    attention_fig = create_attention_visualization(model, X, feature_names)
+    # 2. Feature Importance Analysis (data only, no plots)
+    print("📊 Step 2: Feature Importance Analysis")
+    feature_importance = create_feature_importance_analysis_no_plot(model, X, feature_names, method='shap')
     
-    # 3. Feature Importance Analysis
-    print("📊 Step 3: Feature Importance Analysis")
-    feature_importance = create_feature_importance_analysis(model, X, feature_names, method='shap')
-    
-    # 4. Confidence Analysis
-    print("🎯 Step 4: Confidence Analysis")
+    # 3. Confidence Analysis (data only, no plots)
+    print("🎯 Step 3: Confidence Analysis")
     confidence_metrics = calculate_confidence_metrics(model, X, y_true)
     
     # Get predictions and confidence scores
@@ -1058,8 +1182,6 @@ def generate_explainability_report(model, X, y_true, feature_names, ticker="STOC
     
     predictions = np.array(predictions)
     confidence_scores = np.array(confidence_scores)
-    
-    confidence_fig = visualize_confidence_analysis(confidence_metrics, predictions, confidence_scores, y_true)
     
     # 5. Generate summary report
     print(f"\n📋 EXPLAINABILITY REPORT SUMMARY for {ticker}")
@@ -1117,11 +1239,7 @@ def generate_explainability_report(model, X, y_true, feature_names, ticker="STOC
             'mse': mse,
             'rmse': np.sqrt(mse)
         },
-        'figures': {
-            'shap': shap_fig,
-            'attention': attention_fig,
-            'confidence': confidence_fig
-        }
+        'figures': {}
     }
 
 def create_interactive_dashboard(model, X, y_true, feature_names, ticker="STOCK"):
@@ -1653,7 +1771,10 @@ def enhanced_options_analysis(S0, K, T, r, sigma, num_simulations=10000):
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot instead of showing it
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"enhanced_options_analysis_{timestamp}")
     
     # 7. Summary and Insights
     print(f"\n💡 KEY INSIGHTS")
@@ -1987,7 +2108,10 @@ def demo_advanced_models():
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot instead of showing it
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"advanced_models_comparison_{timestamp}")
     
     # Performance comparison
     print(f"\n📊 PERFORMANCE COMPARISON")
@@ -2693,12 +2817,13 @@ def demo_explainability_features():
     except Exception as e:
         print(f"⚠️ Regime heatmap failed: {str(e)}")
     
-    # 6. Generate Comprehensive Report
+    # 6. Generate Comprehensive Report (without duplicate plots)
     print("\n📋 Step 6: Comprehensive Explainability Report")
     print("-" * 40)
     
     try:
-        report = generate_explainability_report(
+        # Generate report without creating duplicate plots
+        report = generate_explainability_report_no_plots(
             model, X_scaled, y_true, feature_names, ticker="DEMO"
         )
         print("✅ Comprehensive explainability report generated!")
@@ -2747,6 +2872,91 @@ def demo_explainability_features():
     print("   • Focus on top 5-7 features for decision making")
     print("   • Use confidence scores for position sizing")
     print("   • Regular model explainability audits")
+    
+    # Save explainability results
+    print(f"\n💾 Saving explainability results...")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Save model predictions and confidence scores
+    explainability_data = {
+        'predictions': predictions.tolist() if 'predictions' in locals() else [],
+        'confidence_scores': confidence_scores.tolist() if 'confidence_scores' in locals() else [],
+        'y_true': y_true.tolist(),
+        'feature_names': feature_names,
+        'confidence_metrics': confidence_metrics if 'confidence_metrics' in locals() else {},
+        'feature_importance': feature_importance if 'feature_importance' in locals() else {}
+    }
+    
+    save_data(explainability_data, f"explainability_results_{timestamp}")
+    
+    # Create explainability report
+    explainability_report = f"""
+Explainability & Transparency Analysis Report
+Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+MODEL TRAINING
+==============
+• Model Type: ExplainableGBMModel with Attention Mechanism
+• Training Samples: {n_samples}
+• Features: {n_features}
+• Training Epochs: 50
+• Final Loss: {loss.item():.6f} (if available)
+
+FEATURE IMPORTANCE
+==================
+Top 5 Most Important Features:
+"""
+    
+    if 'feature_importance' in locals() and feature_importance:
+        for i, (feature, score) in enumerate(zip(
+            feature_importance['sorted_features'][:5], 
+            feature_importance['sorted_scores'][:5]
+        )):
+            explainability_report += f"{i+1}. {feature}: {score:.4f}\n"
+    
+    explainability_report += f"""
+CONFIDENCE ANALYSIS
+==================
+"""
+    
+    if 'confidence_metrics' in locals() and confidence_metrics:
+        explainability_report += f"""
+• Mean Confidence: {confidence_metrics['mean_confidence']:.3f}
+• Confidence Std: {confidence_metrics['confidence_std']:.3f}
+• High Confidence Ratio: {confidence_metrics['high_conf_ratio']:.1%}
+• Reliability Score: {confidence_metrics['reliability_score']:.3f}
+• High Confidence MAE: {confidence_metrics['high_conf_mae']:.6f}
+• Low Confidence MAE: {confidence_metrics['low_conf_mae']:.6f}
+• Confidence Improvement: {confidence_metrics['confidence_improvement']:.6f}
+"""
+    
+    explainability_report += f"""
+KEY INSIGHTS
+============
+• Model confidence correlates with prediction accuracy
+• Top features drive 80% of model decisions
+• Regime detection helps identify market state changes
+• SHAP values show feature contribution to predictions
+• Attention weights reveal model focus areas
+
+RISK MANAGEMENT RECOMMENDATIONS
+==============================
+• Trust predictions when confidence > 0.7
+• Monitor regime changes for portfolio adjustments
+• Focus on top 5-7 features for decision making
+• Use confidence scores for position sizing
+• Regular model explainability audits
+
+OUTPUT FILES
+============
+• Plots: output/plots/ (SHAP, Attention, Confidence, Regime visualizations)
+• Data: output/data/explainability_results_{timestamp}.json
+• This report: output/reports/explainability_report_{timestamp}.txt
+"""
+    
+    save_report(explainability_report, f"explainability_report_{timestamp}")
+    
+    print(f"✅ Explainability results saved to output/ directory")
 
 # Main execution
 if __name__ == "__main__":
@@ -2760,6 +2970,9 @@ if __name__ == "__main__":
     print("5. 📊 Portfolio Options Analysis")
     print("6. 🔍 Explainability & Transparency Features")
     print("="*70)
+    
+    # Create timestamp for this run
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Run theoretical demonstration
     print("\n🎯 Running theoretical demonstration...")
@@ -2777,13 +2990,86 @@ if __name__ == "__main__":
     print("\n🔍 Running explainability & transparency demonstration...")
     demo_explainability_features()
     
-    # Example with real data (uncomment to use)
-    # print("\n📈 Running analysis with real data...")
-    # ticker = "AAPL"
-    # results = analyze_stock_enhanced(ticker, forecast_months=6)
+    # Save results data
+    print("\n💾 Saving results data...")
+    if options_results:
+        save_data(options_results, f"options_analysis_results_{timestamp}")
+    if portfolio_results:
+        save_data(portfolio_results, f"portfolio_analysis_results_{timestamp}")
+    
+    # Create summary report
+    print("\n📋 Creating summary report...")
+    report_text = f"""
+Enhanced GBM Analysis Report
+Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+SUMMARY
+=======
+This analysis demonstrates advanced quantitative models that extend traditional GBM:
+
+1. Heston Stochastic Volatility Model
+   - Captures volatility clustering and mean reversion
+   - Models leverage effects between price and volatility
+   - Provides more realistic volatility dynamics
+
+2. Regime-Switching GBM Model
+   - Models multiple market regimes (Bull, Bear, Crisis)
+   - Captures structural breaks and regime persistence
+   - Accounts for sudden market state changes
+
+3. Merton Jump Diffusion Model
+   - Incorporates rare but significant price jumps
+   - Models fat tails and extreme events
+   - Captures crash risk and market discontinuities
+
+4. Options Pricing & Risk Metrics
+   - Black-Scholes analytical pricing
+   - Monte Carlo pricing with multiple models
+   - Greeks calculation and sensitivity analysis
+   - Comprehensive risk metrics (VaR, CVaR, Tail Risk)
+
+5. Portfolio Options Analysis
+   - Multi-asset correlated simulations
+   - Options impact on portfolio risk
+   - Risk improvement quantification
+
+6. Explainability & Transparency Features
+   - SHAP analysis for model interpretability
+   - Attention mechanism visualizations
+   - Regime heatmaps for market state analysis
+   - Confidence scoring and reliability assessment
+
+OUTPUT FILES
+============
+All plots have been saved as PNG files in the output/plots/ directory
+All data has been saved as JSON files in the output/data/ directory
+This report is saved in the output/reports/ directory
+
+KEY INSIGHTS
+============
+• Advanced models provide more sophisticated alternatives to traditional GBM
+• Each model captures different aspects of market behavior
+• Options pricing benefits from multiple model approaches
+• Explainability features enhance model transparency and trust
+• Risk metrics help quantify model performance and reliability
+
+RECOMMENDATIONS
+==============
+• Use Heston model for volatility-sensitive instruments
+• Apply regime-switching for long-term strategic decisions
+• Employ jump diffusion for risk management and tail events
+• Combine multiple models for comprehensive analysis
+• Regular model validation and explainability audits
+"""
+    
+    save_report(report_text, f"enhanced_gbm_analysis_report_{timestamp}")
     
     print(f"\n✅ Enhanced GBM analysis completed!")
     print("🎉 Advanced quantitative models and options pricing provide sophisticated alternatives!")
+    print(f"\n📁 All outputs saved to: {OUTPUT_DIR}/")
+    print("   • Plots: output/plots/")
+    print("   • Data: output/data/")
+    print("   • Reports: output/reports/")
     print("\n💡 Key Features Implemented:")
     print("   • Black-Scholes analytical pricing")
     print("   • Monte Carlo pricing with multiple models")
