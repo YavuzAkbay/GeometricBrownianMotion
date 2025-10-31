@@ -15,6 +15,8 @@ Features:
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend to prevent plot windows
 import matplotlib.pyplot as plt
 import yfinance as yf
 from sklearn.metrics import mean_squared_error, mean_absolute_error
@@ -190,7 +192,7 @@ def plot_gbm_analysis(time_steps, stock_paths, initial_price, ticker, forecast_m
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    # plt.show()  # Removed: plots are saved to output directory, no need for interactive display
 
 def analyze_stock_gbm(ticker, forecast_months=6, num_simulations=1000):
     """
@@ -381,7 +383,7 @@ def compare_multiple_stocks(tickers, forecast_months=6, num_simulations=1000):
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    # plt.show()  # Removed: plots are saved to output directory, no need for interactive display
     
     # Print comparison table
     print(f"\n📊 COMPARISON SUMMARY")

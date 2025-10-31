@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend to prevent plot windows
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
@@ -12,7 +14,31 @@ import warnings
 import math
 import torch.nn.functional as F
 from torch.distributions import Normal, kl_divergence
+import os
+from datetime import datetime
 warnings.filterwarnings('ignore')
+
+# Create output directory structure
+def create_output_directories():
+    """Create output directories for saving plots and data"""
+    base_dir = "output"
+    subdirs = ["plots", "data", "reports"]
+    
+    for subdir in subdirs:
+        os.makedirs(os.path.join(base_dir, subdir), exist_ok=True)
+    
+    return base_dir
+
+# Initialize output directories
+OUTPUT_DIR = create_output_directories()
+
+def save_plot(fig, filename, subdir="plots"):
+    """Save matplotlib figure as PNG file"""
+    filepath = os.path.join(OUTPUT_DIR, subdir, f"{filename}.png")
+    fig.savefig(filepath, dpi=400, bbox_inches='tight', facecolor='white')
+    plt.close(fig)  # Close the figure to free memory
+    print(f"📊 Plot saved: {filepath}")
+    return filepath
 
 class PositionalEncoding(nn.Module):
     """Positional encoding for transformer architecture"""
@@ -677,7 +703,10 @@ def plot_training_results(metrics, ticker):
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"ml_training_results_{ticker}_{timestamp}")
 
 def plot_uncertainty_analysis(metrics, ticker):
     """Plot uncertainty quantification analysis"""
@@ -747,7 +776,10 @@ def plot_uncertainty_analysis(metrics, ticker):
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"bayesian_uncertainty_{ticker}_{timestamp}")
 
 def enhanced_analysis_and_visualization(ticker, model, scaler_X, scaler_y, 
                                       enhanced_data, feature_columns, 
@@ -884,7 +916,10 @@ def enhanced_analysis_and_visualization(ticker, model, scaler_X, scaler_y,
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the first plot
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"enhanced_ml_analysis_{ticker}_{timestamp}")
     
     # Additional technical analysis plot
     fig2, ((ax5, ax6), (ax7, ax8)) = plt.subplots(2, 2, figsize=(16, 10))
@@ -935,7 +970,10 @@ def enhanced_analysis_and_visualization(ticker, model, scaler_X, scaler_y,
     ax8.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the second plot
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig2, f"technical_analysis_{ticker}_{timestamp}")
     
     # Performance comparison
     ml_expected_return = (np.mean(ml_final_prices) / current_price - 1) * 100
@@ -1125,7 +1163,10 @@ def enhanced_analysis_with_uncertainty(ticker, model, scaler_X, scaler_y,
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"bayesian_uncertainty_analysis_{ticker}_{timestamp}")
     
     # Performance comparison with uncertainty
     bayesian_expected_return = (np.mean(bayesian_final_prices) / current_price - 1) * 100
@@ -1581,7 +1622,7 @@ def compare_models_performance(ticker, sequence_length=60, epochs=50):
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    # plt.show()  # Removed: plots are saved to output directory, no need for interactive display
     
     return results
 
@@ -1884,7 +1925,10 @@ def enhanced_heston_analysis(ticker, model, scaler_X, scaler_y, enhanced_data, f
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"heston_stochastic_volatility_{ticker}_{timestamp}")
     
     # Performance analysis
     heston_expected_return = (np.mean(heston_final_prices) / current_price - 1) * 100
@@ -2049,7 +2093,10 @@ def enhanced_regime_switching_analysis(ticker, model, scaler_X, scaler_y, enhanc
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"regime_switching_gbm_{ticker}_{timestamp}")
     
     # Performance analysis
     regime_expected_return = (np.mean(regime_final_prices) / current_price - 1) * 100
@@ -2216,7 +2263,10 @@ def enhanced_jump_diffusion_analysis(ticker, model, scaler_X, scaler_y, enhanced
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the plot
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"jump_diffusion_{ticker}_{timestamp}")
     
     # Performance analysis
     jump_expected_return = (np.mean(jump_final_prices) / current_price - 1) * 100
@@ -2438,7 +2488,10 @@ def comprehensive_quantitative_analysis(ticker, model, scaler_X, scaler_y, enhan
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save the comprehensive comparison plot
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_plot(fig, f"comprehensive_model_comparison_{ticker}_{timestamp}")
     
     # Print comprehensive comparison results
     print(f"\n📊 COMPREHENSIVE QUANTITATIVE ANALYSIS RESULTS")

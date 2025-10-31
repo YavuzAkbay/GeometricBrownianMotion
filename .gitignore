@@ -32,3 +32,12 @@ ENV/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+
+# Test files
+*test*.py
+test_*.py
+*_test.py
+
+# Generated output and cache directories
+output/
+cache/

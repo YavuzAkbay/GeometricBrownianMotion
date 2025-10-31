@@ -1,10 +1,15 @@
 yfinance
 numpy
 pandas
-torch
+torch>=1.9.0
 matplotlib
 scikit-learn
 scipy
 seaborn
 shap
 plotly
+
+# GPU/CUDA support (optional)
+# For CUDA 11.8: torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# For CUDA 12.1: torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# For CPU only: torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu

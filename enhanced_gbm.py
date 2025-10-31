@@ -15,6 +15,8 @@ These models provide the sophisticated features that quants demand.
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend to prevent plot windows
 import matplotlib.pyplot as plt
 import yfinance as yf
 import torch
@@ -39,7 +41,80 @@ from plotly.subplots import make_subplots
 import os
 import json
 from datetime import datetime
+import time
 warnings.filterwarnings('ignore')
+
+# GPU/CUDA setup and utilities
+def setup_gpu():
+    """Setup GPU device and return device object"""
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        print(f"🚀 GPU Acceleration Available: {torch.cuda.get_device_name(0)}")
+        print(f"   • CUDA Version: {torch.version.cuda}")
+        print(f"   • GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        return device
+    else:
+        device = torch.device('cpu')
+        print("⚠️  GPU not available, using CPU")
+        return device
+
+def get_device():
+    """Get the current device (GPU if available, CPU otherwise)"""
+    return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+def to_gpu(tensor_or_array, device=None):
+    """Convert numpy array or tensor to GPU tensor"""
+    if device is None:
+        device = get_device()
+    
+    if isinstance(tensor_or_array, np.ndarray):
+        return torch.from_numpy(tensor_or_array).float().to(device)
+    elif isinstance(tensor_or_array, torch.Tensor):
+        return tensor_or_array.float().to(device)
+    else:
+        return torch.tensor(tensor_or_array, dtype=torch.float32).to(device)
+
+def to_cpu(tensor):
+    """Convert GPU tensor back to numpy array"""
+    if isinstance(tensor, torch.Tensor):
+        return tensor.detach().cpu().numpy()
+    return tensor
+
+def benchmark_gpu_vs_cpu(func, *args, gpu_func=None, num_runs=3, **kwargs):
+    """Benchmark GPU vs CPU performance"""
+    device = get_device()
+    
+    # CPU timing
+    cpu_times = []
+    for _ in range(num_runs):
+        start_time = time.time()
+        result_cpu = func(*args, **kwargs)
+        cpu_times.append(time.time() - start_time)
+    
+    cpu_avg = np.mean(cpu_times)
+    
+    # GPU timing (if available and gpu_func provided)
+    if torch.cuda.is_available() and gpu_func is not None:
+        gpu_times = []
+        for _ in range(num_runs):
+            torch.cuda.synchronize()  # Ensure GPU operations are complete
+            start_time = time.time()
+            result_gpu = gpu_func(*args, **kwargs)
+            torch.cuda.synchronize()
+            gpu_times.append(time.time() - start_time)
+        
+        gpu_avg = np.mean(gpu_times)
+        speedup = cpu_avg / gpu_avg
+        
+        print(f"📊 Performance Benchmark:")
+        print(f"   • CPU Time: {cpu_avg:.4f}s")
+        print(f"   • GPU Time: {gpu_avg:.4f}s")
+        print(f"   • Speedup: {speedup:.2f}x")
+        
+        return result_gpu, speedup
+    else:
+        print(f"📊 CPU Time: {cpu_avg:.4f}s")
+        return result_cpu, 1.0
 
 # Create output directory structure
 def create_output_directories():
@@ -54,6 +129,944 @@ def create_output_directories():
 
 # Initialize output directories
 OUTPUT_DIR = create_output_directories()
+
+# GPU-Accelerated Simulation Functions
+def gpu_heston_stochastic_volatility_simulation(S0, mu, kappa, theta, sigma_v, rho, T, N, num_simulations=1000, device=None, seed=None):
+    """
+    GPU-Accelerated Heston Stochastic Volatility Model Simulation
+    
+    Parameters:
+    - S0: Initial stock price
+    - mu: Risk-free rate
+    - kappa: Mean reversion speed of volatility
+    - theta: Long-term mean of volatility
+    - sigma_v: Volatility of volatility
+    - rho: Correlation between stock and volatility processes
+    - T: Time horizon
+    - N: Number of time steps
+    - num_simulations: Number of simulation paths
+    - device: GPU device to use
+    - seed: Random seed for reproducibility (None for random)
+    
+    Returns:
+    - time_steps: Array of time points
+    - stock_paths: Array of stock price paths
+    - volatility_paths: Array of volatility paths
+    """
+    if device is None:
+        device = get_device()
+    
+    dt = T / N
+    time_steps = np.linspace(0, T, N+1)
+    
+    # Convert parameters to GPU tensors
+    S0_gpu = to_gpu(S0, device)
+    mu_gpu = to_gpu(mu, device)
+    kappa_gpu = to_gpu(kappa, device)
+    theta_gpu = to_gpu(theta, device)
+    sigma_v_gpu = to_gpu(sigma_v, device)
+    rho_gpu = to_gpu(rho, device)
+    dt_gpu = to_gpu(dt, device)
+    
+    # Initialize GPU tensors
+    stock_paths = torch.zeros(num_simulations, N+1, device=device)
+    volatility_paths = torch.zeros(num_simulations, N+1, device=device)
+    
+    # Set initial values
+    stock_paths[:, 0] = S0_gpu
+    volatility_paths[:, 0] = theta_gpu
+    
+    # Generate all random numbers at once for efficiency
+    if seed is not None:
+        torch.manual_seed(seed)  # For reproducibility
+    Z1 = torch.randn(num_simulations, N, device=device)
+    Z2 = torch.randn(num_simulations, N, device=device)
+    Z_v = rho_gpu * Z1 + torch.sqrt(1 - rho_gpu**2) * Z2
+    
+    # Vectorized simulation
+    for t in range(N):
+        # Current values
+        S_t = stock_paths[:, t]
+        v_t = volatility_paths[:, t]
+        
+        # Update volatility (CIR process) - vectorized
+        dv = kappa_gpu * (theta_gpu - v_t) * dt_gpu + sigma_v_gpu * torch.sqrt(v_t) * torch.sqrt(dt_gpu) * Z_v[:, t]
+        v_new = torch.clamp(v_t + dv, min=0.0001)  # Ensure positive volatility
+        
+        # Update stock price using log-Euler scheme - vectorized
+        S_new = S_t * torch.exp((mu_gpu - 0.5 * v_new) * dt_gpu + torch.sqrt(v_new) * torch.sqrt(dt_gpu) * Z1[:, t])
+        
+        # Store values
+        stock_paths[:, t+1] = S_new
+        volatility_paths[:, t+1] = v_new
+    
+    # Convert back to CPU numpy arrays
+    result = time_steps, to_cpu(stock_paths), to_cpu(volatility_paths)
+    
+    # Clean up GPU memory
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    return result
+
+def gpu_regime_switching_gbm_simulation(S0, mu_states, sigma_states, transition_matrix, T, N, num_simulations=1000, device=None, seed=None):
+    """
+    GPU-Accelerated Regime-Switching GBM Simulation
+    
+    Parameters:
+    - S0: Initial stock price
+    - mu_states: Array of drift parameters for each regime
+    - sigma_states: Array of volatility parameters for each regime
+    - transition_matrix: Matrix of transition probabilities between regimes
+    - T: Time horizon
+    - N: Number of time steps
+    - num_simulations: Number of simulation paths
+    - device: GPU device to use
+    - seed: Random seed for reproducibility (None for random)
+    
+    Returns:
+    - time_steps: Array of time points
+    - stock_paths: Array of stock price paths
+    - regime_paths: Array of regime paths
+    """
+    if device is None:
+        device = get_device()
+    
+    dt = T / N
+    time_steps = np.linspace(0, T, N+1)
+    num_regimes = len(mu_states)
+    
+    # Convert parameters to GPU tensors
+    S0_gpu = to_gpu(S0, device)
+    mu_states_gpu = to_gpu(np.array(mu_states), device)
+    sigma_states_gpu = to_gpu(np.array(sigma_states), device)
+    transition_matrix_gpu = to_gpu(transition_matrix, device)
+    dt_gpu = to_gpu(dt, device)
+    
+    # Initialize GPU tensors
+    stock_paths = torch.zeros(num_simulations, N+1, device=device)
+    regime_paths = torch.zeros(num_simulations, N+1, dtype=torch.long, device=device)
+    
+    # Set initial values
+    stock_paths[:, 0] = S0_gpu
+    regime_paths[:, 0] = 0  # Start in regime 0
+    
+    # Generate all random numbers at once
+    if seed is not None:
+        torch.manual_seed(seed)
+    dW = torch.randn(num_simulations, N, device=device) * torch.sqrt(dt_gpu)
+    uniform_rand = torch.rand(num_simulations, N, device=device)
+    
+    # Vectorized simulation
+    for t in range(N):
+        # Current values
+        S_t = stock_paths[:, t]
+        current_regime = regime_paths[:, t]
+        
+        # Get current regime parameters - vectorized
+        mu = mu_states_gpu[current_regime]
+        sigma = sigma_states_gpu[current_regime]
+        
+        # Update stock price using GBM exact discretization - vectorized
+        S_new = S_t * torch.exp((mu - 0.5 * sigma**2) * dt_gpu + sigma * dW[:, t])
+        
+        # Transition to new regime - vectorized
+        transition_probs = transition_matrix_gpu[current_regime]
+        cumsum_probs = torch.cumsum(transition_probs, dim=1)
+        
+        # Find new regime for each simulation - VECTORIZED
+        # Compare random values with cumulative probabilities for all simulations at once
+        rand_vals = uniform_rand[:, t].unsqueeze(1)  # [num_simulations, 1]
+        
+        # For each simulation, find where its random value falls in its cumulative distribution
+        # We need to compare each simulation's random value with its own cumulative probabilities
+        # Use advanced indexing to get the right cumulative probabilities for each simulation
+        sim_indices = torch.arange(num_simulations, device=device)
+        cumsum_probs_sim = cumsum_probs[sim_indices]  # [num_simulations, num_regimes]
+        
+        # Compare random values with cumulative probabilities
+        # Find the first regime where cumulative probability >= random value
+        regime_comparison = rand_vals <= cumsum_probs_sim  # [num_simulations, num_regimes]
+        
+        # Find the first True value for each simulation (the selected regime)
+        new_regime = torch.argmax(regime_comparison.int(), dim=1)  # [num_simulations]
+        
+        # Store values
+        stock_paths[:, t+1] = S_new
+        regime_paths[:, t+1] = new_regime
+    
+    # Convert back to CPU numpy arrays
+    result = time_steps, to_cpu(stock_paths), to_cpu(regime_paths)
+    
+    # Clean up GPU memory
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    return result
+
+def gpu_merton_jump_diffusion_simulation(S0, mu, sigma, lambda_jump, mu_jump, sigma_jump, T, N, num_simulations=1000, device=None, seed=None):
+    """
+    GPU-Accelerated Merton Jump Diffusion Model Simulation
+    
+    Parameters:
+    - S0: Initial stock price
+    - mu: Drift parameter (continuous part)
+    - sigma: Volatility parameter (continuous part)
+    - lambda_jump: Jump intensity (Poisson parameter)
+    - mu_jump: Mean of jump size (log-normal)
+    - sigma_jump: Standard deviation of jump size (log-normal)
+    - T: Time horizon
+    - N: Number of time steps
+    - num_simulations: Number of simulation paths
+    - device: GPU device to use
+    - seed: Random seed for reproducibility (None for random)
+    
+    Returns:
+    - time_steps: Array of time points
+    - stock_paths: Array of stock price paths
+    - jump_times: Array of jump occurrence times
+    """
+    if device is None:
+        device = get_device()
+    
+    dt = T / N
+    time_steps = np.linspace(0, T, N+1)
+    
+    # Convert parameters to GPU tensors
+    S0_gpu = to_gpu(S0, device)
+    mu_gpu = to_gpu(mu, device)
+    sigma_gpu = to_gpu(sigma, device)
+    lambda_jump_gpu = to_gpu(lambda_jump, device)
+    mu_jump_gpu = to_gpu(mu_jump, device)
+    sigma_jump_gpu = to_gpu(sigma_jump, device)
+    dt_gpu = to_gpu(dt, device)
+    
+    # Initialize GPU tensors
+    stock_paths = torch.zeros(num_simulations, N+1, device=device)
+    jump_times = torch.zeros(num_simulations, N+1, dtype=torch.bool, device=device)
+    
+    # Set initial values
+    stock_paths[:, 0] = S0_gpu
+    
+    # Generate all random numbers at once
+    if seed is not None:
+        torch.manual_seed(seed)
+    dW = torch.randn(num_simulations, N, device=device) * torch.sqrt(dt_gpu)
+    uniform_rand = torch.rand(num_simulations, N, device=device)
+    
+    # Vectorized simulation
+    for t in range(N):
+        # Current stock price
+        S_t = stock_paths[:, t]
+        
+        # Continuous part (GBM exact discretization) - vectorized
+        continuous_factor = torch.exp((mu_gpu - 0.5 * sigma_gpu**2) * dt_gpu + sigma_gpu * dW[:, t])
+        
+        # Jump part (Poisson process) - vectorized
+        jump_prob = lambda_jump_gpu * dt_gpu
+        jump_occurred = uniform_rand[:, t] < jump_prob
+        jump_times[:, t+1] = jump_occurred
+        
+        # Jump factor (log-normal jump multiplier) - vectorized
+        jump_factor = torch.ones(num_simulations, device=device)
+        if jump_occurred.any():
+            # Generate log-normal jumps only for paths where jumps occurred
+            jump_sizes = torch.distributions.LogNormal(mu_jump_gpu, sigma_jump_gpu).sample((num_simulations,))
+            jump_factor = torch.where(jump_occurred, jump_sizes, torch.ones_like(jump_sizes))
+        
+        # Total update (multiplicative) - vectorized
+        S_new = S_t * continuous_factor * jump_factor
+        
+        # Store values
+        stock_paths[:, t+1] = S_new
+    
+    # Convert back to CPU numpy arrays
+    result = time_steps, to_cpu(stock_paths), to_cpu(jump_times)
+    
+    # Clean up GPU memory
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    return result
+
+def gpu_standard_gbm_simulation(S0, mu, sigma, T, N, num_simulations=1000, device=None, seed=None):
+    """
+    GPU-Accelerated Standard GBM Simulation
+    
+    Parameters:
+    - S0: Initial stock price
+    - mu: Drift parameter
+    - sigma: Volatility parameter
+    - T: Time horizon
+    - N: Number of time steps
+    - num_simulations: Number of simulation paths
+    - device: GPU device to use
+    - seed: Random seed for reproducibility (None for random)
+    
+    Returns:
+    - time_steps: Array of time points
+    - stock_paths: Array of stock price paths
+    """
+    if device is None:
+        device = get_device()
+    
+    dt = T / N
+    time_steps = np.linspace(0, T, N+1)
+    
+    # Convert parameters to GPU tensors
+    S0_gpu = to_gpu(S0, device)
+    mu_gpu = to_gpu(mu, device)
+    sigma_gpu = to_gpu(sigma, device)
+    dt_gpu = to_gpu(dt, device)
+    
+    # Initialize GPU tensor
+    stock_paths = torch.zeros(num_simulations, N+1, device=device)
+    stock_paths[:, 0] = S0_gpu
+    
+    # Generate all random numbers at once
+    if seed is not None:
+        torch.manual_seed(seed)
+    dW = torch.randn(num_simulations, N, device=device) * torch.sqrt(dt_gpu)
+    
+    # Vectorized simulation
+    for t in range(N):
+        S_t = stock_paths[:, t]
+        S_new = S_t * torch.exp((mu_gpu - 0.5 * sigma_gpu**2) * dt_gpu + sigma_gpu * dW[:, t])
+        stock_paths[:, t+1] = S_new
+    
+    # Convert back to CPU numpy array
+    result = time_steps, to_cpu(stock_paths)
+    
+    # Clean up GPU memory
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    return result
+
+# GPU-Accelerated Options Pricing and Risk Metrics
+def gpu_monte_carlo_option_pricing(stock_paths, K, T, r, option_type='call', num_simulations=None, device=None):
+    """
+    GPU-Accelerated Monte Carlo Option Pricing
+    
+    Parameters:
+    - stock_paths: Array of stock price paths (num_simulations x time_steps)
+    - K: Strike price
+    - T: Time to expiration
+    - r: Risk-free rate
+    - option_type: 'call' or 'put'
+    - num_simulations: Number of simulations (if None, inferred from stock_paths)
+    - device: GPU device to use
+    
+    Returns:
+    - Dictionary with option price, standard error, and confidence interval
+    """
+    if device is None:
+        device = get_device()
+    
+    if num_simulations is None:
+        num_simulations = stock_paths.shape[0]
+    
+    # Convert to GPU tensors
+    stock_paths_gpu = to_gpu(stock_paths, device)
+    K_gpu = to_gpu(K, device)
+    r_gpu = to_gpu(r, device)
+    
+    # Get final stock prices
+    final_prices = stock_paths_gpu[:, -1]
+    
+    # Calculate payoffs
+    if option_type.lower() == 'call':
+        payoffs = torch.clamp(final_prices - K_gpu, min=0.0)
+    else:  # put
+        payoffs = torch.clamp(K_gpu - final_prices, min=0.0)
+    
+    # Discount to present value
+    discounted_payoffs = payoffs * torch.exp(-r_gpu * T)
+    
+    # Calculate statistics
+    option_price = torch.mean(discounted_payoffs)
+    std_error = torch.std(discounted_payoffs) / torch.sqrt(torch.tensor(num_simulations, device=device))
+    
+    # 95% confidence interval
+    confidence_interval = 1.96 * std_error
+    
+    return {
+        'option_price': to_cpu(option_price),
+        'std_error': to_cpu(std_error),
+        'confidence_interval': to_cpu(confidence_interval),
+        'payoffs': to_cpu(discounted_payoffs)
+    }
+
+def gpu_calculate_risk_metrics(returns, confidence_levels=[0.01, 0.05, 0.1], device=None, price_paths=None):
+    """
+    GPU-Accelerated Risk Metrics Calculation
+    
+    Parameters:
+    - returns: Array of returns (final returns for each simulation)
+    - confidence_levels: List of confidence levels for VaR/CVaR
+    - device: GPU device to use
+    - price_paths: Optional array of price paths (num_simulations x num_time_steps) for accurate drawdown calculation
+    
+    Returns:
+    - Dictionary with comprehensive risk metrics
+    """
+    if device is None:
+        device = get_device()
+    
+    # Convert to GPU tensor
+    returns_gpu = to_gpu(returns, device)
+    
+    metrics = {}
+    
+    # Basic statistics
+    metrics['mean'] = to_cpu(torch.mean(returns_gpu))
+    metrics['volatility'] = to_cpu(torch.std(returns_gpu))
+    
+    # Skewness and Kurtosis
+    mean_ret = torch.mean(returns_gpu)
+    std_ret = torch.std(returns_gpu)
+    normalized_returns = (returns_gpu - mean_ret) / std_ret
+    
+    metrics['skewness'] = to_cpu(torch.mean(normalized_returns**3))
+    metrics['kurtosis'] = to_cpu(torch.mean(normalized_returns**4) - 3)
+    
+    # Value at Risk (VaR) and Conditional VaR (Expected Shortfall)
+    for alpha in confidence_levels:
+        var = torch.quantile(returns_gpu, alpha)
+        cvar = torch.mean(returns_gpu[returns_gpu <= var])
+        
+        metrics[f'var_{int(alpha*100)}'] = to_cpu(var)
+        metrics[f'cvar_{int(alpha*100)}'] = to_cpu(cvar)
+    
+    # Maximum Drawdown - calculate from price paths if available, otherwise use simplified approximation
+    if price_paths is not None:
+        # Calculate maximum drawdown from actual price paths
+        price_paths_gpu = to_gpu(price_paths, device)
+        
+        # For each simulation, calculate the maximum drawdown along its path
+        # Shape: (num_simulations, num_time_steps)
+        initial_prices = price_paths_gpu[:, 0:1]  # (num_simulations, 1)
+        running_max = torch.cummax(price_paths_gpu, dim=1)[0]  # (num_simulations, num_time_steps)
+        drawdown = (price_paths_gpu - running_max) / running_max  # (num_simulations, num_time_steps)
+        max_drawdown_per_sim = torch.min(drawdown, dim=1)[0]  # (num_simulations,)
+        
+        # Use the worst drawdown across all simulations as the metric
+        max_drawdown = torch.min(max_drawdown_per_sim)
+        
+        # Clamp to valid range [-1, 0] (convert to [-100%, 0%])
+        max_drawdown = torch.clamp(max_drawdown, -1.0, 0.0)
+        metrics['max_drawdown'] = to_cpu(max_drawdown)
+    else:
+        # Fallback: approximate maximum drawdown from final returns
+        # Use the worst return as an approximation (conservative estimate)
+        worst_return = torch.min(returns_gpu)
+        # Clamp to valid range [-1, 0] for drawdown
+        max_drawdown = torch.clamp(worst_return, -1.0, 0.0)
+        metrics['max_drawdown'] = to_cpu(max_drawdown)
+    
+    # Tail Risk (probability of extreme losses)
+    extreme_threshold = torch.quantile(returns_gpu, 0.01)
+    tail_risk = torch.mean(returns_gpu[returns_gpu <= extreme_threshold])
+    metrics['tail_risk'] = to_cpu(tail_risk)
+    
+    # Downside Deviation
+    downside_returns = returns_gpu[returns_gpu < 0]
+    downside_deviation = torch.std(downside_returns) if len(downside_returns) > 0 else torch.tensor(0.0, device=device)
+    metrics['downside_deviation'] = to_cpu(downside_deviation)
+    
+    return metrics
+
+def gpu_calculate_greeks(S, K, T, r, sigma, option_type='call', device=None):
+    """
+    GPU-Accelerated Greeks Calculation
+    
+    Parameters:
+    - S: Stock price
+    - K: Strike price
+    - T: Time to expiration
+    - r: Risk-free rate
+    - sigma: Volatility
+    - option_type: 'call' or 'put'
+    - device: GPU device to use
+    
+    Returns:
+    - Dictionary with Greeks (Delta, Gamma, Vega, Theta)
+    """
+    if device is None:
+        device = get_device()
+    
+    # Convert to GPU tensors
+    S_gpu = to_gpu(S, device)
+    K_gpu = to_gpu(K, device)
+    T_gpu = to_gpu(T, device)
+    r_gpu = to_gpu(r, device)
+    sigma_gpu = to_gpu(sigma, device)
+    
+    # Black-Scholes calculations on GPU
+    d1 = (torch.log(S_gpu / K_gpu) + (r_gpu + 0.5 * sigma_gpu**2) * T_gpu) / (sigma_gpu * torch.sqrt(T_gpu))
+    d2 = d1 - sigma_gpu * torch.sqrt(T_gpu)
+    
+    # Standard normal CDF approximation
+    def norm_cdf(x):
+        return 0.5 * (1 + torch.erf(x / torch.sqrt(torch.tensor(2.0, device=device))))
+    
+    def norm_pdf(x):
+        return torch.exp(-0.5 * x**2) / torch.sqrt(torch.tensor(2.0, device=x.device, dtype=x.dtype) * torch.pi)
+    
+    N_d1 = norm_cdf(d1)
+    N_d2 = norm_cdf(d2)
+    n_d1 = norm_pdf(d1)
+    
+    if option_type.lower() == 'call':
+        delta = N_d1
+        theta = (-S_gpu * n_d1 * sigma_gpu / (2 * torch.sqrt(T_gpu)) - 
+                r_gpu * K_gpu * torch.exp(-r_gpu * T_gpu) * N_d2)
+    else:  # put
+        delta = N_d1 - 1
+        theta = (-S_gpu * n_d1 * sigma_gpu / (2 * torch.sqrt(T_gpu)) + 
+                r_gpu * K_gpu * torch.exp(-r_gpu * T_gpu) * (1 - N_d2))
+    
+    gamma = n_d1 / (S_gpu * sigma_gpu * torch.sqrt(T_gpu))
+    vega = S_gpu * n_d1 * torch.sqrt(T_gpu)
+    
+    return {
+        'delta': to_cpu(delta),
+        'gamma': to_cpu(gamma),
+        'vega': to_cpu(vega),
+        'theta': to_cpu(theta)
+    }
+
+# GPU-Accelerated Enhanced Options Analysis
+def gpu_enhanced_options_analysis(S0, K, T, r, sigma, num_simulations=10000, device=None, benchmark=True):
+    """
+    GPU-Accelerated Comprehensive Options Analysis
+    
+    Parameters:
+    - S0: Initial stock price
+    - K: Strike price
+    - T: Time to expiration (in years)
+    - r: Risk-free rate
+    - sigma: Volatility
+    - num_simulations: Number of Monte Carlo simulations
+    - device: GPU device to use
+    - benchmark: Whether to run performance benchmarks
+    
+    Returns:
+    - Dictionary with comprehensive analysis results
+    """
+    if device is None:
+        device = get_device()
+    
+    print(f"🚀 GPU-ACCELERATED ENHANCED OPTIONS ANALYSIS")
+    print("="*60)
+    print(f"Device: {device}")
+    print(f"Stock Price: ${S0:.2f}")
+    print(f"Strike Price: ${K:.2f}")
+    print(f"Time to Expiration: {T:.2f} years")
+    print(f"Risk-free Rate: {r:.2%}")
+    print(f"Volatility: {sigma:.2%}")
+    print(f"Monte Carlo Simulations: {num_simulations:,}")
+    print("="*60)
+    
+    # Setup timing
+    start_time = time.time()
+    
+    # 1. Black-Scholes Analytical Pricing (GPU-accelerated Greeks)
+    print(f"\n📊 BLACK-SCHOLES ANALYTICAL PRICING (GPU)")
+    print("-" * 40)
+    
+    call_price_bs = black_scholes_call(S0, K, T, r, sigma)
+    put_price_bs = black_scholes_put(S0, K, T, r, sigma)
+    
+    # GPU-accelerated Greeks
+    call_greeks = gpu_calculate_greeks(S0, K, T, r, sigma, 'call', device)
+    put_greeks = gpu_calculate_greeks(S0, K, T, r, sigma, 'put', device)
+    
+    print(f"Call Option Price: ${call_price_bs:.4f}")
+    print(f"Put Option Price:  ${put_price_bs:.4f}")
+    print(f"Call Greeks - Delta: {call_greeks['delta']:.4f}, Gamma: {call_greeks['gamma']:.6f}")
+    print(f"Put Greeks - Delta: {put_greeks['delta']:.4f}, Gamma: {put_greeks['gamma']:.6f}")
+    
+    # 2. GPU-Accelerated Monte Carlo Pricing
+    print(f"\n🎲 GPU MONTE CARLO OPTION PRICING")
+    print("-" * 40)
+    
+    # Time steps
+    N = max(1, int(np.ceil(T * 252)))
+    dt = T / N
+    
+    # GPU-accelerated simulations
+    gpu_start = time.time()
+    
+    # Standard GBM paths (GPU)
+    _, gbm_paths = gpu_standard_gbm_simulation(S0, r, sigma, T, N, num_simulations, device)
+    
+    # Heston paths (GPU)
+    kappa, theta, sigma_v, rho = 2.0, sigma**2, 0.3, -0.7
+    _, heston_paths, _ = gpu_heston_stochastic_volatility_simulation(
+        S0, r, kappa, theta, sigma_v, rho, T, N, num_simulations, device
+    )
+    
+    # Regime-switching paths (GPU)
+    mu_states = [r, r-0.03, r-0.08]
+    sigma_states = [sigma, sigma*1.5, sigma*2.0]
+    transition_matrix = np.array([[0.95, 0.04, 0.01], [0.03, 0.94, 0.03], [0.01, 0.04, 0.95]])
+    _, regime_paths, _ = gpu_regime_switching_gbm_simulation(
+        S0, mu_states, sigma_states, transition_matrix, T, N, num_simulations, device
+    )
+    
+    # Jump diffusion paths (GPU)
+    lambda_jump, mu_jump, sigma_jump = 0.1, -0.02, 0.05
+    _, jump_paths, _ = gpu_merton_jump_diffusion_simulation(
+        S0, r, sigma, lambda_jump, mu_jump, sigma_jump, T, N, num_simulations, device
+    )
+    
+    gpu_sim_time = time.time() - gpu_start
+    print(f"GPU Simulation Time: {gpu_sim_time:.4f}s")
+    
+    # GPU-accelerated Monte Carlo pricing
+    models = ['GBM', 'Heston SV', 'Regime-Switching', 'Jump Diffusion']
+    paths_list = [gbm_paths, heston_paths, regime_paths, jump_paths]
+    
+    mc_results = {}
+    
+    print(f"{'Model':20} {'Call Price':>12} {'Put Price':>12} {'Std Error':>12}")
+    print("-" * 60)
+    
+    for model_name, paths in zip(models, paths_list):
+        call_mc = gpu_monte_carlo_option_pricing(paths, K, T, r, 'call', num_simulations, device)
+        put_mc = gpu_monte_carlo_option_pricing(paths, K, T, r, 'put', num_simulations, device)
+        
+        mc_results[model_name] = {
+            'call': call_mc,
+            'put': put_mc
+        }
+        
+        print(f"{model_name:20} {call_mc['option_price']:>12.4f} {put_mc['option_price']:>12.4f} {call_mc['std_error']:>12.4f}")
+    
+    # 3. GPU-Accelerated Risk Metrics Analysis
+    print(f"\n🎯 GPU RISK METRICS ANALYSIS")
+    print("-" * 40)
+    
+    risk_results = {}
+    
+    for model_name, paths in zip(models, paths_list):
+        final_prices = paths[:, -1]
+        returns = (final_prices - S0) / S0
+        
+        # Pass price paths for accurate maximum drawdown calculation
+        risk_metrics = gpu_calculate_risk_metrics(returns, device=device, price_paths=paths)
+        risk_results[model_name] = risk_metrics
+    
+    # Display risk metrics comparison
+    print(f"{'Model':20} {'VaR(1%)':>10} {'VaR(5%)':>10} {'CVaR(5%)':>10} {'Max DD':>10}")
+    print("-" * 60)
+    
+    for model_name in models:
+        metrics = risk_results[model_name]
+        print(f"{model_name:20} {metrics['var_1']*100:>10.2f} {metrics['var_5']*100:>10.2f} "
+              f"{metrics['cvar_5']*100:>10.2f} {metrics['max_drawdown']*100:>10.2f}")
+    
+    # 4. Performance Benchmarking
+    if benchmark and torch.cuda.is_available():
+        print(f"\n⚡ PERFORMANCE BENCHMARKING")
+        print("-" * 40)
+        
+        # Benchmark simulation functions
+        def cpu_heston():
+            from gbm import heston_stochastic_volatility_simulation
+            return heston_stochastic_volatility_simulation(S0, r, kappa, theta, sigma_v, rho, T, N, 1000)
+        
+        def gpu_heston():
+            return gpu_heston_stochastic_volatility_simulation(S0, r, kappa, theta, sigma_v, rho, T, N, 1000, device)
+        
+        print("Heston Simulation Benchmark (1000 paths):")
+        _, speedup_heston = benchmark_gpu_vs_cpu(cpu_heston, gpu_func=gpu_heston)
+        
+        # Benchmark options pricing
+        def cpu_options():
+            return monte_carlo_option_pricing(gbm_paths, K, T, r, 'call', num_simulations)
+        
+        def gpu_options():
+            return gpu_monte_carlo_option_pricing(gbm_paths, K, T, r, 'call', num_simulations, device)
+        
+        print("\nOptions Pricing Benchmark:")
+        _, speedup_options = benchmark_gpu_vs_cpu(cpu_options, gpu_func=gpu_options)
+        
+        print(f"\n📊 Overall GPU Speedup: {speedup_heston:.2f}x (simulation) + {speedup_options:.2f}x (pricing)")
+    
+    total_time = time.time() - start_time
+    print(f"\n⏱️  Total GPU Analysis Time: {total_time:.4f}s")
+    
+    # Clean up GPU memory after major analysis
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    # Compile results
+    results = {
+        'black_scholes': {
+            'call_price': call_price_bs,
+            'put_price': put_price_bs,
+            'call_greeks': call_greeks,
+            'put_greeks': put_greeks
+        },
+        'monte_carlo': mc_results,
+        'risk_metrics': risk_results,
+        'performance': {
+            'total_time': total_time,
+            'gpu_simulation_time': gpu_sim_time,
+            'device': str(device)
+        }
+    }
+    
+    return results
+
+# GPU Performance Testing Function
+def test_gpu_performance():
+    """Test GPU performance with various simulation sizes"""
+    print("🧪 GPU PERFORMANCE TESTING")
+    print("="*50)
+    
+    device = setup_gpu()
+    
+    # Test parameters
+    S0, K, T, r, sigma = 100.0, 105.0, 0.5, 0.03, 0.25
+    N = 252
+    
+    # Test different simulation sizes
+    simulation_sizes = [1000, 5000, 10000, 50000]
+    
+    results = {}
+    
+    for num_sims in simulation_sizes:
+        print(f"\n📊 Testing {num_sims:,} simulations...")
+        
+        # Time GPU simulation
+        start_time = time.time()
+        _, paths = gpu_standard_gbm_simulation(S0, r, sigma, T, N, num_sims, device)
+        gpu_time = time.time() - start_time
+        
+        # Time GPU options pricing
+        start_time = time.time()
+        option_result = gpu_monte_carlo_option_pricing(paths, K, T, r, 'call', num_sims, device)
+        pricing_time = time.time() - start_time
+        
+        results[num_sims] = {
+            'simulation_time': gpu_time,
+            'pricing_time': pricing_time,
+            'total_time': gpu_time + pricing_time,
+            'option_price': option_result['option_price']
+        }
+        
+        print(f"   • Simulation: {gpu_time:.4f}s")
+        print(f"   • Pricing: {pricing_time:.4f}s")
+        print(f"   • Total: {gpu_time + pricing_time:.4f}s")
+        print(f"   • Option Price: ${option_result['option_price']:.4f}")
+    
+    # Performance scaling analysis
+    print(f"\n📈 PERFORMANCE SCALING ANALYSIS")
+    print("-" * 40)
+    
+    base_sims = simulation_sizes[0]
+    base_time = results[base_sims]['total_time']
+    
+    print(f"{'Simulations':>12} {'Time (s)':>10} {'Speedup':>10} {'Efficiency':>12}")
+    print("-" * 50)
+    
+    for num_sims in simulation_sizes:
+        time_taken = results[num_sims]['total_time']
+        theoretical_speedup = num_sims / base_sims
+        actual_speedup = base_time / time_taken
+        efficiency = actual_speedup / theoretical_speedup * 100
+        
+        print(f"{num_sims:>12,} {time_taken:>10.4f} {actual_speedup:>10.2f}x {efficiency:>11.1f}%")
+    
+    return results
+
+# Main GPU Demo Function
+def demo_gpu_acceleration():
+    """Demonstrate GPU acceleration capabilities"""
+    print("🚀 GPU ACCELERATION DEMONSTRATION")
+    print("="*60)
+    print("This demo showcases GPU-accelerated quantitative finance models:")
+    print("• Heston Stochastic Volatility Model")
+    print("• Regime-Switching GBM Model") 
+    print("• Merton Jump Diffusion Model")
+    print("• Monte Carlo Options Pricing")
+    print("• Risk Metrics Calculation")
+    print("• Performance Benchmarking")
+    print("="*60)
+    
+    # Setup GPU
+    device = setup_gpu()
+    
+    # Example parameters
+    S0 = 100.0  # Initial stock price
+    K = 105.0   # Strike price
+    T = 0.5     # Time to expiration (6 months)
+    r = 0.03    # Risk-free rate (3%)
+    sigma = 0.25  # Volatility (25%)
+    num_simulations = 10000
+    
+    print(f"\n📊 DEMO PARAMETERS:")
+    print(f"Stock Price: ${S0}")
+    print(f"Strike Price: ${K}")
+    print(f"Time to Expiration: {T} years")
+    print(f"Risk-free Rate: {r:.1%}")
+    print(f"Volatility: {sigma:.1%}")
+    print(f"Simulations: {num_simulations:,}")
+    
+    # Run GPU-accelerated analysis
+    results = gpu_enhanced_options_analysis(S0, K, T, r, sigma, num_simulations, device, benchmark=True)
+    
+    # Performance testing
+    print(f"\n🧪 PERFORMANCE TESTING")
+    print("="*40)
+    perf_results = test_gpu_performance()
+    
+    # Summary
+    print(f"\n✅ GPU ACCELERATION DEMO COMPLETED!")
+    print("🎉 Key Benefits Demonstrated:")
+    print("   • Massive parallelization of Monte Carlo simulations")
+    print("   • Vectorized operations for risk calculations")
+    print("   • Significant speedup for large-scale computations")
+    print("   • Seamless integration with existing quantitative models")
+    
+    if torch.cuda.is_available():
+        print(f"\n📈 Performance Summary:")
+        print(f"   • Device: {torch.cuda.get_device_name(0)}")
+        print(f"   • Total Analysis Time: {results['performance']['total_time']:.4f}s")
+        print(f"   • GPU Simulation Time: {results['performance']['gpu_simulation_time']:.4f}s")
+        print(f"   • Memory Usage: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+    else:
+        print("   • CPU fallback mode (GPU not available)")
+    
+    return results, perf_results
+
+# Enhanced main function with GPU support
+def main_gpu_enhanced():
+    """Main function with GPU acceleration support"""
+    print("🎯 ENHANCED GBM WITH GPU ACCELERATION")
+    print("="*60)
+    print("Advanced quantitative models with CUDA acceleration:")
+    print("• GPU-accelerated Monte Carlo simulations")
+    print("• Vectorized risk calculations")
+    print("• High-performance options pricing")
+    print("• Real-time performance benchmarking")
+    print("="*60)
+    
+    # Setup
+    device = setup_gpu()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Run GPU demo
+    print(f"\n🚀 RUNNING GPU ACCELERATION DEMO...")
+    results, perf_results = demo_gpu_acceleration()
+    
+    # Save results
+    print(f"\n💾 SAVING RESULTS...")
+    save_data(results, f"gpu_enhanced_analysis_results_{timestamp}")
+    save_data(perf_results, f"gpu_performance_results_{timestamp}")
+    
+    # Generate report
+    report_text = f"""
+GPU-ACCELERATED ENHANCED GBM ANALYSIS REPORT
+==========================================
+Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Device: {device}
+
+EXECUTIVE SUMMARY
+================
+This analysis demonstrates the power of GPU acceleration in quantitative finance,
+showing significant performance improvements for Monte Carlo simulations and
+risk calculations.
+
+GPU ACCELERATION FEATURES
+=========================
+1. CUDA-Accelerated Simulations
+   - Heston Stochastic Volatility Model
+   - Regime-Switching GBM Model
+   - Merton Jump Diffusion Model
+   - Standard GBM with vectorized operations
+
+2. GPU-Optimized Calculations
+   - Monte Carlo options pricing
+   - Risk metrics (VaR, CVaR, Greeks)
+   - Statistical computations
+   - Performance benchmarking
+
+3. Performance Benefits
+   - Massive parallelization
+   - Vectorized operations
+   - Memory-efficient processing
+   - Real-time performance monitoring
+
+TECHNICAL SPECIFICATIONS
+========================
+• Framework: PyTorch with CUDA support
+• Device: {device}
+• Simulation Engine: GPU-accelerated Monte Carlo
+• Memory Management: Automatic GPU memory handling
+• Fallback: CPU mode when GPU unavailable
+
+PERFORMANCE METRICS
+==================
+• Total Analysis Time: {results['performance']['total_time']:.4f}s
+• GPU Simulation Time: {results['performance']['gpu_simulation_time']:.4f}s
+• Device Utilization: Optimized for parallel processing
+
+OPTIONS PRICING RESULTS
+=======================
+Black-Scholes Analytical:
+• Call Price: ${results['black_scholes']['call_price']:.4f}
+• Put Price: ${results['black_scholes']['put_price']:.4f}
+
+Monte Carlo Results (GPU):
+"""
+    
+    for model, data in results['monte_carlo'].items():
+        report_text += f"• {model}: Call ${data['call']['option_price']:.4f}, Put ${data['put']['option_price']:.4f}\n"
+    
+    report_text += f"""
+RISK METRICS SUMMARY
+===================
+"""
+    for model, metrics in results['risk_metrics'].items():
+        report_text += f"• {model}: VaR(5%) {metrics['var_5']*100:.2f}%, Max DD {metrics['max_drawdown']*100:.2f}%\n"
+    
+    report_text += f"""
+RECOMMENDATIONS
+==============
+• Use GPU acceleration for large-scale Monte Carlo simulations
+• Leverage vectorized operations for risk calculations
+• Monitor GPU memory usage for optimal performance
+• Consider batch processing for multiple scenarios
+• Implement performance benchmarking for optimization
+
+CONCLUSION
+==========
+GPU acceleration provides significant performance improvements for quantitative
+finance applications, enabling real-time analysis of complex models and large
+simulation datasets. The implementation maintains compatibility with existing
+CPU-based workflows while providing substantial speedup for computationally
+intensive operations.
+"""
+    
+    save_report(report_text, f"gpu_enhanced_analysis_report_{timestamp}")
+    
+    print(f"\n✅ GPU-Enhanced Analysis Completed!")
+    print("🎉 Advanced quantitative models with CUDA acceleration successfully demonstrated!")
+    print(f"\n📁 All outputs saved to: {OUTPUT_DIR}/")
+    print("   • Plots: output/plots/")
+    print("   • Data: output/data/")
+    print("   • Reports: output/reports/")
+    print("\n💡 Key GPU Features Implemented:")
+    print("   • CUDA-accelerated Monte Carlo simulations")
+    print("   • Vectorized risk calculations")
+    print("   • GPU-optimized options pricing")
+    print("   • Real-time performance benchmarking")
+    print("   • Automatic CPU fallback")
+    print("   • Memory-efficient processing")
 
 def save_plot(fig, filename, subdir="plots"):
     """Save matplotlib figure as PNG file"""
@@ -439,9 +1452,12 @@ def create_attention_visualization(model, X, feature_names, sample_indices=None,
         
         # Value annotations removed as requested
         
-        # Color bars by feature value (normalized)
-        feature_values_norm = (feature_values[top_features] - feature_values[top_features].min()) / \
-                             (feature_values[top_features].max() - feature_values[top_features].min() + 1e-8)
+        # Color bars by feature value (normalized) - with numerical stability
+        feature_range = feature_values[top_features].max() - feature_values[top_features].min()
+        if feature_range > 1e-8:  # Avoid division by zero
+            feature_values_norm = (feature_values[top_features] - feature_values[top_features].min()) / feature_range
+        else:
+            feature_values_norm = np.ones_like(feature_values[top_features]) * 0.5  # Default to middle value
         for j, (bar, norm_val) in enumerate(zip(bars, feature_values_norm)):
             bar.set_color(plt.cm.RdYlBu(norm_val))
     
@@ -1185,7 +2201,12 @@ def generate_explainability_report_no_plots(model, X, y_true, feature_names, tic
     # Confidence metrics
     print(f"\n🎯 CONFIDENCE METRICS:")
     print(f"  Mean Confidence Score: {confidence_metrics['mean_confidence']:.3f}")
-    print(f"  Confidence Standard Deviation: {confidence_metrics['confidence_std']:.3f}")
+    confidence_std = confidence_metrics['confidence_std']
+    # Use more decimal places or scientific notation for very small numbers
+    if abs(confidence_std) < 0.001:
+        print(f"  Confidence Standard Deviation: {confidence_std:.6e}")
+    else:
+        print(f"  Confidence Standard Deviation: {confidence_std:.6f}")
     print(f"  High Confidence Ratio: {confidence_metrics['high_conf_ratio']:.1%}")
     print(f"  Reliability Score: {confidence_metrics['reliability_score']:.3f}")
     
@@ -1195,7 +2216,11 @@ def generate_explainability_report_no_plots(model, X, y_true, feature_names, tic
     top_scores = feature_importance['sorted_scores'][:5]
     
     for i, (feature, score) in enumerate(zip(top_features, top_scores)):
-        print(f"  {i+1}. {feature}: {score:.4f}")
+        # Use scientific notation for very small numbers, otherwise use regular notation
+        if abs(score) < 0.001:
+            print(f"  {i+1}. {feature}: {score:.6e}")
+        else:
+            print(f"  {i+1}. {feature}: {score:.6f}")
     
     # Risk management insights
     print(f"\n⚠️ RISK MANAGEMENT INSIGHTS:")
@@ -1482,13 +2507,14 @@ def monte_carlo_option_pricing(stock_paths, K, T, r, option_type='call', num_sim
         'payoffs': discounted_payoffs
     }
 
-def calculate_risk_metrics(returns, confidence_levels=[0.01, 0.05, 0.1]):
+def calculate_risk_metrics(returns, confidence_levels=[0.01, 0.05, 0.1], price_paths=None):
     """
     Calculate comprehensive risk metrics
     
     Parameters:
-    - returns: Array of returns
+    - returns: Array of returns (final returns for each simulation)
     - confidence_levels: List of confidence levels for VaR/CVaR
+    - price_paths: Optional array of price paths (num_simulations x num_time_steps) for accurate drawdown calculation
     
     Returns:
     - Dictionary with risk metrics
@@ -1509,12 +2535,33 @@ def calculate_risk_metrics(returns, confidence_levels=[0.01, 0.05, 0.1]):
         metrics[f'var_{int(alpha*100)}'] = var
         metrics[f'cvar_{int(alpha*100)}'] = cvar
     
-    # Maximum Drawdown
-    cumulative_returns = np.cumprod(1 + returns)
-    running_max = np.maximum.accumulate(cumulative_returns)
-    drawdown = (cumulative_returns - running_max) / running_max
-    max_drawdown = np.min(drawdown)
-    metrics['max_drawdown'] = max_drawdown
+    # Maximum Drawdown - calculate from price paths if available, otherwise use simplified approximation
+    if price_paths is not None:
+        # Calculate maximum drawdown from actual price paths
+        # Shape: (num_simulations, num_time_steps)
+        max_drawdowns = []
+        for sim_path in price_paths:
+            # Calculate running maximum for this simulation path
+            running_max = np.maximum.accumulate(sim_path)
+            # Calculate drawdown at each point
+            drawdown = (sim_path - running_max) / running_max
+            # Maximum drawdown for this simulation
+            max_dd_sim = np.min(drawdown)
+            max_drawdowns.append(max_dd_sim)
+        
+        # Use the worst drawdown across all simulations as the metric
+        max_drawdown = np.min(max_drawdowns)
+        
+        # Clamp to valid range [-1, 0] (convert to [-100%, 0%])
+        max_drawdown = np.clip(max_drawdown, -1.0, 0.0)
+        metrics['max_drawdown'] = max_drawdown
+    else:
+        # Fallback: approximate maximum drawdown from final returns
+        # Use the worst return as an approximation (conservative estimate)
+        worst_return = np.min(returns)
+        # Clamp to valid range [-1, 0] for drawdown
+        max_drawdown = np.clip(worst_return, -1.0, 0.0)
+        metrics['max_drawdown'] = max_drawdown
     
     # Tail Risk (probability of extreme losses)
     extreme_threshold = np.percentile(returns, 1)  # 1% worst case
@@ -1591,14 +2638,23 @@ def enhanced_options_analysis(S0, K, T, r, sigma, num_simulations=10000):
     dt = T / N  # Ensure N * dt == T
     time_steps = np.linspace(0, T, N+1)
     
-    # Generate GBM paths
+    # Generate GBM paths - VECTORIZED for performance
     gbm_paths = np.zeros((num_simulations, N+1))
     gbm_paths[:, 0] = S0
     
-    for i in range(num_simulations):
-        for j in range(1, N+1):
-            z = np.random.normal(0, 1)
-            gbm_paths[i, j] = gbm_paths[i, j-1] * np.exp((r - 0.5*sigma**2)*dt + sigma*np.sqrt(dt)*z)
+    # Pre-generate all random numbers at once
+    z_matrix = np.random.normal(0, 1, (num_simulations, N))
+    
+    # Calculate drift and diffusion terms
+    drift_term = (r - 0.5*sigma**2)*dt
+    diffusion_term = sigma*np.sqrt(dt)
+    
+    # Vectorized path generation using cumulative product
+    for j in range(1, N+1):
+        # Calculate the multiplicative factor for this time step
+        multiplicative_factors = np.exp(drift_term + diffusion_term * z_matrix[:, j-1])
+        # Apply to all simulations at once
+        gbm_paths[:, j] = gbm_paths[:, j-1] * multiplicative_factors
     
     # Heston paths
     kappa, theta, sigma_v, rho = 2.0, sigma**2, 0.3, -0.7
@@ -1651,7 +2707,8 @@ def enhanced_options_analysis(S0, K, T, r, sigma, num_simulations=10000):
         final_prices = paths[:, -1]
         returns = (final_prices - S0) / S0
         
-        risk_metrics = calculate_risk_metrics(returns)
+        # Pass price paths for accurate maximum drawdown calculation
+        risk_metrics = calculate_risk_metrics(returns, price_paths=paths)
         risk_results[model_name] = risk_metrics
     
     # Display risk metrics comparison
@@ -1832,23 +2889,30 @@ def portfolio_options_analysis(portfolio_data, options_data, num_simulations=100
     
     portfolio_paths = np.zeros((num_simulations, num_stocks, N+1))
     
+    # Pre-generate all random numbers for all simulations
+    z_all = np.random.normal(0, 1, (num_simulations, num_stocks, N))
+    
     for sim in range(num_simulations):
-        # Generate correlated random numbers
-        z = np.random.normal(0, 1, (num_stocks, N))
-        correlated_z = L @ z
+        # Generate correlated random numbers for this simulation
+        z = z_all[sim]  # Shape: (num_stocks, N)
+        correlated_z = L @ z  # Shape: (num_stocks, N)
         
+        # Set initial prices for all stocks at once
+        portfolio_paths[sim, :, 0] = initial_prices
+        
+        # Vectorized path generation for all stocks and time steps
         for stock_idx, stock in enumerate(stocks):
-            S0 = initial_prices[stock_idx]
             sigma = portfolio_data[stock]['volatility']
             r = portfolio_data[stock]['risk_free_rate']
             
-            portfolio_paths[sim, stock_idx, 0] = S0
+            # Calculate drift and diffusion terms
+            drift_term = (r - 0.5*sigma**2)*dt
+            diffusion_term = sigma*np.sqrt(dt)
             
+            # Vectorized time evolution for this stock
             for t in range(1, N+1):
-                portfolio_paths[sim, stock_idx, t] = (
-                    portfolio_paths[sim, stock_idx, t-1] * 
-                    np.exp((r - 0.5*sigma**2)*dt + sigma*np.sqrt(dt)*correlated_z[stock_idx, t-1])
-                )
+                multiplicative_factor = np.exp(drift_term + diffusion_term * correlated_z[stock_idx, t-1])
+                portfolio_paths[sim, stock_idx, t] = portfolio_paths[sim, stock_idx, t-1] * multiplicative_factor
     
     # Calculate portfolio values
     portfolio_values = np.zeros((num_simulations, N+1))
@@ -1870,10 +2934,8 @@ def portfolio_options_analysis(portfolio_data, options_data, num_simulations=100
             expiration_step = int(T_option * 252)
             final_prices = portfolio_paths[:, :, expiration_step]
             
-            # Calculate portfolio value at expiration
-            portfolio_at_expiry = np.sum(
-                weights[i] * final_prices[:, i] for i in range(num_stocks)
-            )
+            # Calculate portfolio value at expiration - VECTORIZED
+            portfolio_at_expiry = final_prices @ weights
             
             # Calculate option payoffs
             if option_type == 'call':
@@ -1892,7 +2954,8 @@ def portfolio_options_analysis(portfolio_data, options_data, num_simulations=100
     
     # Calculate portfolio risk metrics
     portfolio_returns = (total_portfolio_values[:, -1] - total_portfolio_values[:, 0]) / total_portfolio_values[:, 0]
-    risk_metrics = calculate_risk_metrics(portfolio_returns)
+    # Pass price paths for accurate maximum drawdown calculation
+    risk_metrics = calculate_risk_metrics(portfolio_returns, price_paths=total_portfolio_values)
     
     # Display results
     print(f"\n📊 PORTFOLIO RISK METRICS")
@@ -1910,7 +2973,8 @@ def portfolio_options_analysis(portfolio_data, options_data, num_simulations=100
     print("-" * 40)
     
     portfolio_only_returns = (portfolio_values[:, -1] - portfolio_values[:, 0]) / portfolio_values[:, 0]
-    portfolio_only_risk = calculate_risk_metrics(portfolio_only_returns)
+    # Pass price paths for accurate maximum drawdown calculation
+    portfolio_only_risk = calculate_risk_metrics(portfolio_only_returns, price_paths=portfolio_values)
     
     print(f"Portfolio without options:")
     print(f"  VaR(5%): {portfolio_only_risk['var_5']:.2%}")
@@ -2389,6 +3453,11 @@ def analyze_stock_enhanced(ticker, forecast_months=6, num_simulations=1000):
         print(f"\n✅ Enhanced GBM analysis completed!")
         print("🎉 Advanced quantitative models successfully applied!")
         
+        # Save comprehensive results with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_data(comprehensive_results, f"comprehensive_gbm_analysis_{ticker}_{timestamp}")
+        print(f"✅ Comprehensive analysis results saved (includes all GBM models and trend detection)")
+        
         return comprehensive_results
         
     except Exception as e:
@@ -2583,7 +3652,12 @@ def compare_explainability_methods(model, X, y_true, feature_names):
             results[method] = importance
             
             print(f"   ✅ {method.upper()} completed successfully")
-            print(f"   Top feature: {importance['sorted_features'][0]} ({importance['sorted_scores'][0]:.4f})")
+            top_score = importance['sorted_scores'][0]
+            # Use scientific notation for very small numbers
+            if abs(top_score) < 0.001:
+                print(f"   Top feature: {importance['sorted_features'][0]} ({top_score:.6e})")
+            else:
+                print(f"   Top feature: {importance['sorted_features'][0]} ({top_score:.6f})")
             
         except Exception as e:
             print(f"   ❌ {method.upper()} failed: {str(e)}")
@@ -2599,7 +3673,11 @@ def compare_explainability_methods(model, X, y_true, feature_names):
                 result['sorted_features'][:3], 
                 result['sorted_scores'][:3]
             )):
-                print(f"   {i+1}. {feature}: {score:.4f}")
+                # Use scientific notation for very small numbers
+                if abs(score) < 0.001:
+                    print(f"   {i+1}. {feature}: {score:.6e}")
+                else:
+                    print(f"   {i+1}. {feature}: {score:.6f}")
     
     return results
 
@@ -2620,6 +3698,7 @@ def demo_explainability_features():
     # Create synthetic data for demonstration
     print("\n📊 Creating synthetic financial data for demonstration...")
     
+    # Use a fixed seed for demonstration purposes only
     np.random.seed(42)
     n_samples = 1000
     n_features = 15
@@ -2740,7 +3819,11 @@ def demo_explainability_features():
             feature_importance['sorted_features'][:5], 
             feature_importance['sorted_scores'][:5]
         )):
-            print(f"   {i+1}. {feature}: {score:.4f}")
+            # Use scientific notation for very small numbers
+            if abs(score) < 0.001:
+                print(f"   {i+1}. {feature}: {score:.6e}")
+            else:
+                print(f"   {i+1}. {feature}: {score:.6f}")
         
     except Exception as e:
         print(f"⚠️ Feature importance analysis failed: {str(e)}")
@@ -2755,7 +3838,12 @@ def demo_explainability_features():
         
         print(f"\n📈 Confidence Metrics:")
         print(f"   • Mean Confidence: {confidence_metrics['mean_confidence']:.3f}")
-        print(f"   • Confidence Std: {confidence_metrics['confidence_std']:.3f}")
+        confidence_std = confidence_metrics['confidence_std']
+        # Use more decimal places or scientific notation for very small numbers
+        if abs(confidence_std) < 0.001:
+            print(f"   • Confidence Std: {confidence_std:.6e}")
+        else:
+            print(f"   • Confidence Std: {confidence_std:.6f}")
         print(f"   • High Confidence Ratio: {confidence_metrics['high_conf_ratio']:.1%}")
         print(f"   • Reliability Score: {confidence_metrics['reliability_score']:.3f}")
         
@@ -2876,6 +3964,7 @@ def demo_explainability_features():
     save_data(explainability_data, f"explainability_results_{timestamp}")
     
     # Create explainability report
+    final_loss_str = f"{loss.item():.6f}" if 'loss' in locals() else "N/A"
     explainability_report = f"""
 Explainability & Transparency Analysis Report
 Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -2886,7 +3975,7 @@ MODEL TRAINING
 • Training Samples: {n_samples}
 • Features: {n_features}
 • Training Epochs: 50
-• Final Loss: {loss.item():.6f} (if available)
+• Final Loss: {final_loss_str} (if available)
 
 FEATURE IMPORTANCE
 ==================
@@ -2898,7 +3987,11 @@ Top 5 Most Important Features:
             feature_importance['sorted_features'][:5], 
             feature_importance['sorted_scores'][:5]
         )):
-            explainability_report += f"{i+1}. {feature}: {score:.4f}\n"
+            # Use scientific notation for very small numbers, otherwise use regular notation
+            if abs(score) < 0.001:
+                explainability_report += f"{i+1}. {feature}: {score:.6e}\n"
+            else:
+                explainability_report += f"{i+1}. {feature}: {score:.6f}\n"
     
     explainability_report += f"""
 CONFIDENCE ANALYSIS
@@ -2906,9 +3999,11 @@ CONFIDENCE ANALYSIS
 """
     
     if 'confidence_metrics' in locals() and confidence_metrics:
+        confidence_std = confidence_metrics['confidence_std']
+        confidence_std_str = f"{confidence_std:.6e}" if abs(confidence_std) < 0.001 else f"{confidence_std:.6f}"
         explainability_report += f"""
 • Mean Confidence: {confidence_metrics['mean_confidence']:.3f}
-• Confidence Std: {confidence_metrics['confidence_std']:.3f}
+• Confidence Std: {confidence_std_str}
 • High Confidence Ratio: {confidence_metrics['high_conf_ratio']:.1%}
 • Reliability Score: {confidence_metrics['reliability_score']:.3f}
 • High Confidence MAE: {confidence_metrics['high_conf_mae']:.6f}
@@ -2946,25 +4041,87 @@ OUTPUT FILES
 
 # Main execution
 if __name__ == "__main__":
-    print("🚀 Enhanced GBM with Advanced Quantitative Models & Options Pricing")
+    print("🚀 Enhanced GBM with GPU Acceleration & Advanced Quantitative Models")
     print("="*70)
     print("Available models:")
-    print("1. 🌊 Heston Stochastic Volatility")
-    print("2. 🔄 Regime-Switching GBM")
-    print("3. ⚡ Merton Jump Diffusion")
-    print("4. 🎯 Options Pricing & Risk Metrics")
+    print("1. 🌊 Heston Stochastic Volatility (GPU-accelerated)")
+    print("2. 🔄 Regime-Switching GBM (GPU-accelerated)")
+    print("3. ⚡ Merton Jump Diffusion (GPU-accelerated)")
+    print("4. 🎯 Options Pricing & Risk Metrics (GPU-accelerated)")
     print("5. 📊 Portfolio Options Analysis")
     print("6. 🔍 Explainability & Transparency Features")
+    print("7. 🚀 GPU Performance Benchmarking")
     print("="*70)
+    
+    # Get stock ticker from user
+    print("\n📊 STOCK TICKER INPUT")
+    print("-" * 70)
+    print("Enter a stock ticker symbol (e.g., AAPL, MSFT, GOOGL, TSLA)")
+    print("Press Enter to skip and use demo data with synthetic examples")
+    user_input = input("Stock Ticker (or press Enter for demo): ").strip().upper()
+    
+    if user_input:
+        ticker = user_input
+        print(f"\n✅ Using ticker: {ticker}")
+        use_real_ticker = True
+    else:
+        ticker = "DEMO"
+        print("\n✅ Using demo data (synthetic examples)")
+        use_real_ticker = False
+    
+    # Check for GPU availability
+    device = setup_gpu()
+    
+    # Choose execution mode
+    print(f"\n🎯 EXECUTION MODES:")
+    print("1. GPU-Accelerated Analysis (Recommended)")
+    print("2. Traditional CPU Analysis")
+    print("3. Performance Comparison")
     
     # Create timestamp for this run
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Run theoretical demonstration
-    print("\n🎯 Running theoretical demonstration...")
-    demo_advanced_models()
+    # Run analysis based on ticker input
+    if use_real_ticker:
+        # Run real stock analysis if ticker is provided
+        print(f"\n🚀 Running Enhanced Analysis for {ticker}...")
+        print("="*70)
+        
+        try:
+            # Run enhanced stock analysis
+            stock_results = analyze_stock_enhanced(ticker, forecast_months=6, num_simulations=1000)
+            
+            # Save comprehensive analysis results (GBM data, trend detection, model comparisons)
+            if stock_results:
+                print(f"\n💾 Saving comprehensive analysis results for {ticker}...")
+                save_data(stock_results, f"comprehensive_gbm_analysis_{ticker}_{timestamp}")
+                print(f"✅ Comprehensive results saved (includes GBM paths, trend detection, and model comparisons)")
+            
+            # Also run GPU-accelerated analysis
+            print(f"\n🚀 Running GPU-Accelerated Analysis for {ticker}...")
+            main_gpu_enhanced()
+            
+        except Exception as e:
+            print(f"\n⚠️ Error analyzing {ticker}: {str(e)}")
+            print("Falling back to demo mode...")
+            use_real_ticker = False
+            ticker = "DEMO"
     
-    # Run options pricing demonstration
+    if not use_real_ticker:
+        # Run demo analysis with synthetic data
+        print(f"\n🚀 Running GPU-Accelerated Analysis (Demo Mode)...")
+        main_gpu_enhanced()
+        
+        # Also run traditional analysis for comparison
+        print(f"\n🔄 Running Traditional Analysis for Comparison...")
+        print("🚀 Enhanced GBM with Advanced Quantitative Models & Options Pricing")
+        print("="*70)
+        
+        # Run theoretical demonstration
+        print("\n🎯 Running theoretical demonstration...")
+        demo_advanced_models()
+    
+    # Run options pricing demonstration (works with both real and demo data)
     print("\n🎯 Running options pricing demonstration...")
     options_results = demo_options_pricing()
     
@@ -2985,9 +4142,10 @@ if __name__ == "__main__":
     
     # Create summary report
     print("\n📋 Creating summary report...")
+    ticker_info = f"\nStock Ticker: {ticker}" if use_real_ticker else "\nMode: Demo (Synthetic Data)"
     report_text = f"""
 Enhanced GBM Analysis Report
-Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}{ticker_info}
 
 SUMMARY
 =======
@@ -3028,7 +4186,18 @@ This analysis demonstrates advanced quantitative models that extend traditional 
 OUTPUT FILES
 ============
 All plots have been saved as PNG files in the output/plots/ directory
-All data has been saved as JSON files in the output/data/ directory
+All data has been saved as JSON files in the output/data/ directory:
+  - comprehensive_gbm_analysis_[ticker]_[timestamp].json: Complete GBM analysis including:
+    * Heston Stochastic Volatility model results (predictions, volatility paths, trend data)
+    * Regime-Switching GBM model results (predictions, regime paths, trend analysis)
+    * Merton Jump Diffusion model results (predictions, jump times, trend data)
+    * Traditional GBM results (predictions, trend analysis)
+    * Model comparison metrics (expected returns, volatilities, risk metrics)
+    * All simulation paths and trend detection data
+  - options_analysis_results_[timestamp].json: Options pricing analysis
+  - portfolio_analysis_results_[timestamp].json: Portfolio analysis
+  - explainability_results_[timestamp].json: Model explainability analysis
+  - gpu_enhanced_analysis_results_[timestamp].json: GPU-accelerated analysis
 This report is saved in the output/reports/ directory
 
 KEY INSIGHTS
@@ -3114,7 +4283,12 @@ def compare_explainability_methods(model, X, y_true, feature_names):
             results[method] = importance
             
             print(f"   ✅ {method.upper()} completed successfully")
-            print(f"   Top feature: {importance['sorted_features'][0]} ({importance['sorted_scores'][0]:.4f})")
+            top_score = importance['sorted_scores'][0]
+            # Use scientific notation for very small numbers
+            if abs(top_score) < 0.001:
+                print(f"   Top feature: {importance['sorted_features'][0]} ({top_score:.6e})")
+            else:
+                print(f"   Top feature: {importance['sorted_features'][0]} ({top_score:.6f})")
             
         except Exception as e:
             print(f"   ❌ {method.upper()} failed: {str(e)}")
@@ -3130,6 +4304,10 @@ def compare_explainability_methods(model, X, y_true, feature_names):
                 result['sorted_features'][:3], 
                 result['sorted_scores'][:3]
             )):
-                print(f"   {i+1}. {feature}: {score:.4f}")
+                # Use scientific notation for very small numbers
+                if abs(score) < 0.001:
+                    print(f"   {i+1}. {feature}: {score:.6e}")
+                else:
+                    print(f"   {i+1}. {feature}: {score:.6f}")
     
     return results
