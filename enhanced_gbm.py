@@ -29,12 +29,26 @@ import warnings
 import math
 import torch.nn.functional as F
 from torch.distributions import Normal, kl_divergence
-from scipy.stats import norm
+from scipy.stats import norm, jarque_bera, shapiro, pearsonr
 from scipy.optimize import minimize
 import seaborn as sns
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 import shap
 from sklearn.calibration import calibration_curve
+
+# Optional imports for statistical tests
+try:
+    from statsmodels.stats.diagnostic import acorr_ljungbox
+    from statsmodels.stats.stattools import durbin_watson
+    HAS_STATSMODELS = True
+except ImportError:
+    HAS_STATSMODELS = False
+    # Define dummy functions if statsmodels is not available
+    def acorr_ljungbox(*args, **kwargs):
+        raise ImportError("statsmodels is required for Ljung-Box test")
+    def durbin_watson(*args, **kwargs):
+        raise ImportError("statsmodels is required for Durbin-Watson test")
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
@@ -52,15 +66,22 @@ def setup_gpu():
         print(f"🚀 GPU Acceleration Available: {torch.cuda.get_device_name(0)}")
         print(f"   • CUDA Version: {torch.version.cuda}")
         print(f"   • GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-        return device
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+        print(f"🚀 Apple Metal Performance Shaders (MPS) Available")
     else:
         device = torch.device('cpu')
         print("⚠️  GPU not available, using CPU")
-        return device
+    return device
 
 def get_device():
     """Get the current device (GPU if available, CPU otherwise)"""
-    return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        return torch.device('mps')
+    else:
+        return torch.device('cpu')
 
 def to_gpu(tensor_or_array, device=None):
     """Convert numpy array or tensor to GPU tensor"""
@@ -94,13 +115,19 @@ def benchmark_gpu_vs_cpu(func, *args, gpu_func=None, num_runs=3, **kwargs):
     cpu_avg = np.mean(cpu_times)
     
     # GPU timing (if available and gpu_func provided)
-    if torch.cuda.is_available() and gpu_func is not None:
+    if device.type != 'cpu' and gpu_func is not None:
         gpu_times = []
         for _ in range(num_runs):
-            torch.cuda.synchronize()  # Ensure GPU operations are complete
+            if device.type == 'cuda':
+                torch.cuda.synchronize()  # Ensure GPU operations are complete
+            elif device.type == 'mps':
+                torch.mps.synchronize()
             start_time = time.time()
             result_gpu = gpu_func(*args, **kwargs)
-            torch.cuda.synchronize()
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+            elif device.type == 'mps':
+                torch.mps.synchronize()
             gpu_times.append(time.time() - start_time)
         
         gpu_avg = np.mean(gpu_times)
@@ -108,7 +135,7 @@ def benchmark_gpu_vs_cpu(func, *args, gpu_func=None, num_runs=3, **kwargs):
         
         print(f"📊 Performance Benchmark:")
         print(f"   • CPU Time: {cpu_avg:.4f}s")
-        print(f"   • GPU Time: {gpu_avg:.4f}s")
+        print(f"   • GPU Time ({device.type.upper()}): {gpu_avg:.4f}s")
         print(f"   • Speedup: {speedup:.2f}x")
         
         return result_gpu, speedup
@@ -165,7 +192,7 @@ def gpu_heston_stochastic_volatility_simulation(S0, mu, kappa, theta, sigma_v, r
     kappa_gpu = to_gpu(kappa, device)
     theta_gpu = to_gpu(theta, device)
     sigma_v_gpu = to_gpu(sigma_v, device)
-    rho_gpu = to_gpu(rho, device)
+    rho_gpu = torch.clamp(to_gpu(rho, device), min=-0.9999, max=0.9999)  # Avoid sqrt issues
     dt_gpu = to_gpu(dt, device)
     
     # Initialize GPU tensors
@@ -187,11 +214,11 @@ def gpu_heston_stochastic_volatility_simulation(S0, mu, kappa, theta, sigma_v, r
     for t in range(N):
         # Current values
         S_t = stock_paths[:, t]
-        v_t = volatility_paths[:, t]
+        v_t = torch.clamp(volatility_paths[:, t], min=1e-8)  # Clamp before use to ensure positive
         
         # Update volatility (CIR process) - vectorized
         dv = kappa_gpu * (theta_gpu - v_t) * dt_gpu + sigma_v_gpu * torch.sqrt(v_t) * torch.sqrt(dt_gpu) * Z_v[:, t]
-        v_new = torch.clamp(v_t + dv, min=0.0001)  # Ensure positive volatility
+        v_new = torch.clamp(v_t + dv, min=1e-8)  # Ensure positive volatility
         
         # Update stock price using log-Euler scheme - vectorized
         S_new = S_t * torch.exp((mu_gpu - 0.5 * v_new) * dt_gpu + torch.sqrt(v_new) * torch.sqrt(dt_gpu) * Z1[:, t])
@@ -204,8 +231,10 @@ def gpu_heston_stochastic_volatility_simulation(S0, mu, kappa, theta, sigma_v, r
     result = time_steps, to_cpu(stock_paths), to_cpu(volatility_paths)
     
     # Clean up GPU memory
-    if torch.cuda.is_available():
+    if device.type == 'cuda':
         torch.cuda.empty_cache()
+    elif device.type == 'mps':
+        torch.mps.empty_cache()
     
     return result
 
@@ -289,7 +318,13 @@ def gpu_regime_switching_gbm_simulation(S0, mu_states, sigma_states, transition_
         regime_comparison = rand_vals <= cumsum_probs_sim  # [num_simulations, num_regimes]
         
         # Find the first True value for each simulation (the selected regime)
+        # Use searchsorted-like approach: find first index where cumsum >= rand_val
+        # If all False, argmax returns 0, but we need to handle this properly
+        # Better: use argmax but ensure at least one True per row (last regime always True)
+        # Since cumsum_probs ends with 1.0, the last column is always True
         new_regime = torch.argmax(regime_comparison.int(), dim=1)  # [num_simulations]
+        # Ensure valid regime index (should always be valid due to cumsum ending at 1.0)
+        new_regime = torch.clamp(new_regime, min=0, max=num_regimes-1)
         
         # Store values
         stock_paths[:, t+1] = S_new
@@ -299,8 +334,10 @@ def gpu_regime_switching_gbm_simulation(S0, mu_states, sigma_states, transition_
     result = time_steps, to_cpu(stock_paths), to_cpu(regime_paths)
     
     # Clean up GPU memory
-    if torch.cuda.is_available():
+    if device.type == 'cuda':
         torch.cuda.empty_cache()
+    elif device.type == 'mps':
+        torch.mps.empty_cache()
     
     return result
 
@@ -363,7 +400,9 @@ def gpu_merton_jump_diffusion_simulation(S0, mu, sigma, lambda_jump, mu_jump, si
         continuous_factor = torch.exp((mu_gpu - 0.5 * sigma_gpu**2) * dt_gpu + sigma_gpu * dW[:, t])
         
         # Jump part (Poisson process) - vectorized
-        jump_prob = lambda_jump_gpu * dt_gpu
+        # Use exact Poisson probability: P(jump in dt) = 1 - exp(-lambda*dt)
+        # This is more accurate than lambda*dt approximation, especially for larger dt
+        jump_prob = 1.0 - torch.exp(-lambda_jump_gpu * dt_gpu)
         jump_occurred = uniform_rand[:, t] < jump_prob
         jump_times[:, t+1] = jump_occurred
         
@@ -371,7 +410,10 @@ def gpu_merton_jump_diffusion_simulation(S0, mu, sigma, lambda_jump, mu_jump, si
         jump_factor = torch.ones(num_simulations, device=device)
         if jump_occurred.any():
             # Generate log-normal jumps only for paths where jumps occurred
-            jump_sizes = torch.distributions.LogNormal(mu_jump_gpu, sigma_jump_gpu).sample((num_simulations,))
+            # Add parameter validation and bounds to prevent extreme values
+            sigma_jump_clamped = torch.clamp(sigma_jump_gpu, min=1e-6, max=1.0)
+            jump_sizes = torch.distributions.LogNormal(mu_jump_gpu, sigma_jump_clamped).sample((num_simulations,))
+            jump_sizes = torch.clamp(jump_sizes, min=0.1, max=10.0)  # Bound jump sizes to reasonable range
             jump_factor = torch.where(jump_occurred, jump_sizes, torch.ones_like(jump_sizes))
         
         # Total update (multiplicative) - vectorized
@@ -384,8 +426,10 @@ def gpu_merton_jump_diffusion_simulation(S0, mu, sigma, lambda_jump, mu_jump, si
     result = time_steps, to_cpu(stock_paths), to_cpu(jump_times)
     
     # Clean up GPU memory
-    if torch.cuda.is_available():
+    if device.type == 'cuda':
         torch.cuda.empty_cache()
+    elif device.type == 'mps':
+        torch.mps.empty_cache()
     
     return result
 
@@ -438,8 +482,10 @@ def gpu_standard_gbm_simulation(S0, mu, sigma, T, N, num_simulations=1000, devic
     result = time_steps, to_cpu(stock_paths)
     
     # Clean up GPU memory
-    if torch.cuda.is_available():
+    if device.type == 'cuda':
         torch.cuda.empty_cache()
+    elif device.type == 'mps':
+        torch.mps.empty_cache()
     
     return result
 
@@ -525,15 +571,21 @@ def gpu_calculate_risk_metrics(returns, confidence_levels=[0.01, 0.05, 0.1], dev
     # Skewness and Kurtosis
     mean_ret = torch.mean(returns_gpu)
     std_ret = torch.std(returns_gpu)
-    normalized_returns = (returns_gpu - mean_ret) / std_ret
     
-    metrics['skewness'] = to_cpu(torch.mean(normalized_returns**3))
-    metrics['kurtosis'] = to_cpu(torch.mean(normalized_returns**4) - 3)
+    # Avoid division by zero if all returns are identical
+    if std_ret > 1e-10:
+        normalized_returns = (returns_gpu - mean_ret) / std_ret
+        metrics['skewness'] = to_cpu(torch.mean(normalized_returns**3))
+        metrics['kurtosis'] = to_cpu(torch.mean(normalized_returns**4) - 3)
+    else:
+        metrics['skewness'] = 0.0
+        metrics['kurtosis'] = 0.0
     
     # Value at Risk (VaR) and Conditional VaR (Expected Shortfall)
     for alpha in confidence_levels:
         var = torch.quantile(returns_gpu, alpha)
-        cvar = torch.mean(returns_gpu[returns_gpu <= var])
+        mask = returns_gpu <= var
+        cvar = torch.mean(returns_gpu[mask]) if mask.any() else var
         
         metrics[f'var_{int(alpha*100)}'] = to_cpu(var)
         metrics[f'cvar_{int(alpha*100)}'] = to_cpu(cvar)
@@ -547,7 +599,7 @@ def gpu_calculate_risk_metrics(returns, confidence_levels=[0.01, 0.05, 0.1], dev
         # Shape: (num_simulations, num_time_steps)
         initial_prices = price_paths_gpu[:, 0:1]  # (num_simulations, 1)
         running_max = torch.cummax(price_paths_gpu, dim=1)[0]  # (num_simulations, num_time_steps)
-        drawdown = (price_paths_gpu - running_max) / running_max  # (num_simulations, num_time_steps)
+        drawdown = (price_paths_gpu - running_max) / (running_max + 1e-8)  # (num_simulations, num_time_steps) - add epsilon to prevent division by zero
         max_drawdown_per_sim = torch.min(drawdown, dim=1)[0]  # (num_simulations,)
         
         # Use the worst drawdown across all simulations as the metric
@@ -799,8 +851,10 @@ def gpu_enhanced_options_analysis(S0, K, T, r, sigma, num_simulations=10000, dev
     print(f"\n⏱️  Total GPU Analysis Time: {total_time:.4f}s")
     
     # Clean up GPU memory after major analysis
-    if torch.cuda.is_available():
+    if device.type == 'cuda':
         torch.cuda.empty_cache()
+    elif device.type == 'mps':
+        torch.mps.empty_cache()
     
     # Compile results
     results = {
@@ -932,12 +986,15 @@ def demo_gpu_acceleration():
     print("   • Significant speedup for large-scale computations")
     print("   • Seamless integration with existing quantitative models")
     
-    if torch.cuda.is_available():
+    if device.type != 'cpu':
         print(f"\n📈 Performance Summary:")
-        print(f"   • Device: {torch.cuda.get_device_name(0)}")
+        if device.type == 'cuda':
+            print(f"   • Device: {torch.cuda.get_device_name(0)}")
+            print(f"   • Memory Usage: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        else:
+            print(f"   • Device: {device.type.upper()}")
         print(f"   • Total Analysis Time: {results['performance']['total_time']:.4f}s")
         print(f"   • GPU Simulation Time: {results['performance']['gpu_simulation_time']:.4f}s")
-        print(f"   • Memory Usage: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
     else:
         print("   • CPU fallback mode (GPU not available)")
     
@@ -1103,6 +1160,200 @@ def save_data(data, filename, subdir="data"):
     print(f"📄 Data saved: {filepath}")
     return filepath
 
+def save_comprehensive_explainability_report(report_data, ticker="STOCK", subdir="reports"):
+    """
+    Save comprehensive explainability report to file with all quantitative metrics
+    
+    Parameters:
+    - report_data: Dictionary from generate_explainability_report_no_plots
+    - ticker: Stock ticker
+    - subdir: Subdirectory for reports
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"explainability_report_{ticker}_{timestamp}.txt"
+    
+    report_text = f"""
+================================================================================
+COMPREHENSIVE EXPLAINABILITY & TRANSPARENCY ANALYSIS REPORT
+================================================================================
+Stock Ticker: {ticker}
+Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+================================================================================
+
+EXECUTIVE SUMMARY
+================
+"""
+    
+    if 'quantitative_metrics' in report_data:
+        qm = report_data['quantitative_metrics']
+        report_text += f"""
+Model Performance:
+  • R² Score: {qm['r2']:.4f}
+  • Information Coefficient: {qm['ic']:.4f} (p-value: {qm['ic_pvalue']:.4f})
+  • Directional Accuracy: {qm['directional_accuracy']:.1%}
+  • Sharpe Ratio: {qm['sharpe_ratio']:.4f}
+  • Information Ratio: {qm['information_ratio']:.4f}
+
+Prediction Accuracy:
+  • MAE: {qm['mae']:.6f}
+  • RMSE: {qm['rmse']:.6f}
+  • Maximum Drawdown: {qm['max_drawdown']:.6f}
+"""
+    
+    report_text += f"""
+MODEL PERFORMANCE METRICS
+========================
+"""
+    
+    if 'quantitative_metrics' in report_data:
+        qm = report_data['quantitative_metrics']
+        report_text += f"""
+Regression Metrics:
+  • Mean Absolute Error (MAE): {qm['mae']:.6f}
+  • Mean Squared Error (MSE): {qm['mse']:.6f}
+  • Root Mean Squared Error (RMSE): {qm['rmse']:.6f}
+  • R² Score: {qm['r2']:.4f}
+  • Adjusted R²: {qm['adj_r2']:.4f}
+  • Information Coefficient (IC): {qm['ic']:.4f}
+  • IC p-value: {qm['ic_pvalue']:.4f}
+  • Directional Accuracy: {qm['directional_accuracy']:.1%}
+
+Risk & Return Metrics:
+  • Sharpe Ratio: {qm['sharpe_ratio']:.4f}
+  • Information Ratio: {qm['information_ratio']:.4f}
+  • Tracking Error: {qm['tracking_error']:.6f}
+  • Maximum Drawdown: {qm['max_drawdown']:.6f}
+  • Prediction Volatility: {qm['prediction_volatility']:.6f}
+  • Actual Volatility: {qm['actual_volatility']:.6f}
+  • Volatility Ratio: {qm['volatility_ratio']:.4f}
+
+Error Distribution:
+  • Mean Error: {qm['mean_error']:.6f}
+  • Std Error: {qm['std_error']:.6f}
+  • 5th Percentile: {qm['error_percentiles']['p5']:.6f}
+  • 25th Percentile: {qm['error_percentiles']['p25']:.6f}
+  • Median: {qm['error_percentiles']['p50']:.6f}
+  • 75th Percentile: {qm['error_percentiles']['p75']:.6f}
+  • 95th Percentile: {qm['error_percentiles']['p95']:.6f}
+"""
+    
+    report_text += f"""
+CONFIDENCE METRICS
+==================
+"""
+    
+    if 'confidence_metrics' in report_data:
+        cm = report_data['confidence_metrics']
+        conf_std = cm.get('confidence_std', 0)
+        conf_std_str = f"{conf_std:.6e}" if abs(conf_std) < 0.001 else f"{conf_std:.6f}"
+        report_text += f"""
+• Mean Confidence Score: {cm['mean_confidence']:.3f}
+• Confidence Range: [{cm.get('confidence_min', 0):.3f}, {cm.get('confidence_max', 1):.3f}]
+• Confidence Standard Deviation: {conf_std_str}
+• High Confidence Ratio: {cm['high_conf_ratio']:.1%}
+• Reliability Score: {cm['reliability_score']:.3f}
+"""
+        if 'ece' in cm:
+            report_text += f"• Expected Calibration Error (ECE): {cm['ece']:.4f}\n"
+        report_text += f"""
+• High Confidence MAE: {cm['high_conf_mae']:.6f}
+• Low Confidence MAE: {cm['low_conf_mae']:.6f}
+• Confidence Improvement: {cm['confidence_improvement']:.6f}
+"""
+    
+    report_text += f"""
+FEATURE IMPORTANCE
+==================
+Top 10 Most Important Features:
+"""
+    
+    if 'feature_importance' in report_data:
+        fi = report_data['feature_importance']
+        top_features = fi['sorted_features'][:10]
+        top_scores = fi['sorted_scores'][:10]
+        
+        # Normalize to percentages
+        total = fi.get('total_importance', np.sum(fi['sorted_scores']))
+        if total > 0:
+            top_scores_pct = (top_scores / total) * 100
+            cumulative_pct = np.cumsum(top_scores_pct)
+            for i, (feature, score, pct, cum_pct) in enumerate(zip(top_features, top_scores, top_scores_pct, cumulative_pct)):
+                report_text += f"{i+1}. {feature}: {pct:.2f}% (Cumulative: {cum_pct:.2f}%)\n"
+        else:
+            for i, (feature, score) in enumerate(zip(top_features, top_scores)):
+                if abs(score) < 0.001:
+                    report_text += f"{i+1}. {feature}: {score:.6e}\n"
+                else:
+                    report_text += f"{i+1}. {feature}: {score:.6f}\n"
+    
+    report_text += f"""
+STATISTICAL TESTS
+=================
+"""
+    
+    if 'statistical_tests' in report_data:
+        st = report_data['statistical_tests']
+        if 'jarque_bera' in st and 'statistic' in st['jarque_bera']:
+            jb = st['jarque_bera']
+            report_text += f"""
+Jarque-Bera Test (Normality):
+  • Statistic: {jb['statistic']:.4f}
+  • p-value: {jb['pvalue']:.4f}
+  • Residuals are Normal: {'Yes' if jb['is_normal'] else 'No'}
+"""
+        if 'ljung_box' in st and 'statistic' in st['ljung_box']:
+            lb = st['ljung_box']
+            report_text += f"""
+Ljung-Box Test (Autocorrelation):
+  • Statistic: {lb['statistic']:.4f}
+  • p-value: {lb['pvalue']:.4f}
+  • No Autocorrelation: {'Yes' if lb['no_autocorr'] else 'No'}
+"""
+        if 'durbin_watson' in st and 'statistic' in st['durbin_watson']:
+            dw = st['durbin_watson']
+            report_text += f"""
+Durbin-Watson Test:
+  • Statistic: {dw['statistic']:.4f}
+  • Interpretation: {dw['interpretation']}
+"""
+    
+    report_text += f"""
+ACTIONABLE RECOMMENDATIONS
+=========================
+"""
+    
+    if 'quantitative_metrics' in report_data and 'confidence_metrics' in report_data:
+        qm = report_data['quantitative_metrics']
+        cm = report_data['confidence_metrics']
+        
+        if qm['r2'] < 0.3:
+            report_text += f"⚠️ Low R² ({qm['r2']:.2f}) - Consider feature engineering or model refinement\n"
+        if qm['ic'] < 0.1:
+            report_text += f"⚠️ Low IC ({qm['ic']:.2f}) - Model predictions have weak correlation with actuals\n"
+        if cm['high_conf_ratio'] < 0.1:
+            report_text += f"⚠️ Very few high-confidence predictions ({cm['high_conf_ratio']:.1%}) - Model may be over-cautious\n"
+        if 'ece' in cm and cm['ece'] > 0.1:
+            report_text += f"⚠️ High calibration error ({cm['ece']:.3f}) - Confidence scores may not be well-calibrated\n"
+        
+        report_text += f"""
+• Trust predictions when confidence > 0.7
+• Use directional accuracy ({qm['directional_accuracy']:.1%}) for trading signals
+• Monitor confidence trends for risk management
+• Focus on top features for 80% importance
+• Regular model explainability audits
+"""
+    
+    report_text += f"""
+OUTPUT FILES
+============
+• Plots: output/plots/ (SHAP, Attention, Confidence, Regime visualizations)
+• Data: output/data/explainability_results_{timestamp}.json
+• This report: output/reports/{filename}
+"""
+    
+    save_report(report_text, filename.replace('.txt', ''), subdir)
+    return filename
+
 def save_report(report_text, filename, subdir="reports"):
     """Save text report as TXT file"""
     filepath = os.path.join(OUTPUT_DIR, subdir, f"{filename}.txt")
@@ -1259,7 +1510,7 @@ def calculate_shap_values(model, X, feature_names, background_size=100):
     
     # Ensure drift_shap is a numpy array
     if isinstance(drift_shap, torch.Tensor):
-        drift_shap = drift_shap.detach().numpy()
+        drift_shap = drift_shap.detach().cpu().numpy()
     
     # Squeeze out extra dimensions if present
     if len(drift_shap.shape) == 3 and drift_shap.shape[2] == 1:
@@ -1296,7 +1547,7 @@ def visualize_shap_analysis(shap_results, sample_indices=None, num_samples=10):
     
     # Ensure drift_shap is a numpy array
     if isinstance(drift_shap, torch.Tensor):
-        drift_shap = drift_shap.detach().numpy()
+        drift_shap = drift_shap.detach().cpu().numpy()
     
     # 1. Manual feature importance bar plot (instead of SHAP summary plot)
     try:
@@ -1704,24 +1955,30 @@ def compare_attention_with_other_methods(model, X, feature_names, num_samples=10
     # Calculate permutation importance as comparison
     try:
         from sklearn.inspection import permutation_importance
-        from sklearn.ensemble import RandomForestRegressor
+        from sklearn.base import BaseEstimator
         
-        # Create a simple wrapper for permutation importance
-        def model_predict(X):
-            model.eval()
-            predictions = []
-            with torch.no_grad():
-                for i in range(len(X)):
-                    x = torch.FloatTensor(X[i:i+1])
-                    drift, _, _ = model(x)
-                    predictions.append(drift.item())
-            return np.array(predictions)
+        # Create a proper sklearn estimator wrapper for permutation importance
+        class ModelWrapper(BaseEstimator):
+            def __init__(self, model):
+                self.model = model
+            
+            def predict(self, X):
+                self.model.eval()
+                predictions = []
+                with torch.no_grad():
+                    for i in range(len(X)):
+                        x = torch.FloatTensor(X[i:i+1])
+                        drift, _, _ = self.model(x)
+                        predictions.append(drift.item())
+                return np.array(predictions)
         
-        # Calculate permutation importance
+        # Calculate permutation importance with proper estimator
+        wrapped_model = ModelWrapper(model)
+        y_pred = wrapped_model.predict(X[sample_indices])
         perm_importance = permutation_importance(
-            estimator=None,  # We'll use our custom predict function
+            estimator=wrapped_model,
             X=X[sample_indices], 
-            y=model_predict(X[sample_indices]),
+            y=y_pred,
             n_repeats=5,
             random_state=42,
             scoring='neg_mean_squared_error'
@@ -1744,8 +2001,12 @@ def compare_attention_with_other_methods(model, X, feature_names, num_samples=10
                 predictions.append(drift.item())
         
         predictions = np.array(predictions)
-        correlation_importance = np.abs([np.corrcoef(X[:, i], predictions)[0, 1] for i in range(X.shape[1])])
-        correlation_importance = np.nan_to_num(correlation_importance, nan=0.0)
+        correlation_importance = []
+        for i in range(X.shape[1]):
+            corr = np.corrcoef(X[:, i], predictions)[0, 1]
+            corr = np.nan_to_num(corr, nan=0.0) if not np.isnan(corr) else 0.0
+            correlation_importance.append(np.abs(corr))
+        correlation_importance = np.array(correlation_importance)
         
     except Exception as e:
         print(f"   ⚠️ Correlation importance calculation failed: {str(e)}")
@@ -1839,9 +2100,12 @@ def compare_attention_with_other_methods(model, X, feature_names, num_samples=10
     print(f"   • Correlation method: {np.sum(corr_norm > 0.5)} features with high importance")
     
     # Calculate correlation between methods
-    att_perm_corr = np.corrcoef(att_norm, perm_norm)[0, 1]
-    att_corr_corr = np.corrcoef(att_norm, corr_norm)[0, 1]
-    perm_corr_corr = np.corrcoef(perm_norm, corr_norm)[0, 1]
+    att_perm_corr_val = np.corrcoef(att_norm, perm_norm)[0, 1]
+    att_perm_corr = np.nan_to_num(att_perm_corr_val, nan=0.0) if not np.isnan(att_perm_corr_val) else 0.0
+    att_corr_corr_val = np.corrcoef(att_norm, corr_norm)[0, 1]
+    att_corr_corr = np.nan_to_num(att_corr_corr_val, nan=0.0) if not np.isnan(att_corr_corr_val) else 0.0
+    perm_corr_corr_val = np.corrcoef(perm_norm, corr_norm)[0, 1]
+    perm_corr_corr = np.nan_to_num(perm_corr_corr_val, nan=0.0) if not np.isnan(perm_corr_corr_val) else 0.0
     
     print(f"\n🔄 Method Correlations:")
     print(f"   • Attention vs Permutation: {att_perm_corr:.3f}")
@@ -1904,9 +2168,56 @@ def create_regime_heatmap(regime_predictions, time_index, confidence_scores=None
     
     return fig
 
+def validate_model_predictions(predictions, y_true, confidence_scores, model_name="Model"):
+    """
+    Validate model predictions and provide diagnostics
+    
+    Parameters:
+    - predictions: Model predictions
+    - y_true: True values
+    - confidence_scores: Confidence scores
+    - model_name: Name of the model for reporting
+    
+    Returns:
+    - Dictionary with validation results and warnings
+    """
+    warnings_list = []
+    errors = np.abs(predictions - y_true)
+    
+    # Check for constant predictions
+    pred_std = np.std(predictions)
+    if pred_std < 1e-6:
+        warnings_list.append(f"⚠️ {model_name}: Predictions are essentially constant (std={pred_std:.2e})")
+    
+    # Check prediction range
+    pred_range = np.max(predictions) - np.min(predictions)
+    true_range = np.max(y_true) - np.min(y_true)
+    if pred_range < 0.1 * true_range:
+        warnings_list.append(f"⚠️ {model_name}: Prediction range ({pred_range:.4f}) is much smaller than actual range ({true_range:.4f})")
+    
+    # Check confidence score distribution
+    conf_range = np.max(confidence_scores) - np.min(confidence_scores)
+    if conf_range < 0.1:
+        warnings_list.append(f"⚠️ {model_name}: Confidence scores have very narrow range ({conf_range:.4f})")
+    
+    # Check for NaN or Inf
+    if np.any(np.isnan(predictions)) or np.any(np.isinf(predictions)):
+        warnings_list.append(f"⚠️ {model_name}: Predictions contain NaN or Inf values")
+    
+    if np.any(np.isnan(confidence_scores)) or np.any(np.isinf(confidence_scores)):
+        warnings_list.append(f"⚠️ {model_name}: Confidence scores contain NaN or Inf values")
+    
+    return {
+        'warnings': warnings_list,
+        'prediction_std': pred_std,
+        'prediction_range': pred_range,
+        'confidence_range': conf_range,
+        'is_valid': len(warnings_list) == 0
+    }
+
 def calculate_confidence_metrics(model, X, y_true, threshold=0.7):
     """
-    Calculate confidence scoring metrics
+    Calculate confidence scoring metrics with improved calibration
     
     Parameters:
     - model: Trained model
@@ -1933,6 +2244,21 @@ def calculate_confidence_metrics(model, X, y_true, threshold=0.7):
     predictions = np.array(predictions)
     confidence_scores = np.array(confidence_scores)
     
+    # Validate predictions
+    validation = validate_model_predictions(predictions, y_true, confidence_scores)
+    if validation['warnings']:
+        for warning in validation['warnings']:
+            print(warning)
+    
+    # Normalize confidence scores if they're too narrow (rescale to use full [0,1] range)
+    conf_min, conf_max = confidence_scores.min(), confidence_scores.max()
+    if conf_max - conf_min < 0.2:  # If range is too narrow, rescale
+        # Rescale to use more of the [0,1] range while preserving relative differences
+        confidence_scores_rescaled = (confidence_scores - conf_min) / (conf_max - conf_min + 1e-10)
+        # Expand to use 80% of [0,1] range
+        confidence_scores = 0.1 + 0.8 * confidence_scores_rescaled
+        print(f"   ℹ️  Confidence scores rescaled from [{conf_min:.4f}, {conf_max:.4f}] to use wider range")
+    
     # Calculate prediction errors
     errors = np.abs(predictions - y_true)
     
@@ -1944,15 +2270,44 @@ def calculate_confidence_metrics(model, X, y_true, threshold=0.7):
     high_conf_mae = np.mean(errors[high_conf_mask]) if np.any(high_conf_mask) else 0
     low_conf_mae = np.mean(errors[low_conf_mask]) if np.any(low_conf_mask) else 0
     
-    # Calibration metrics
-    calibration_data = calibration_curve(
-        (errors < np.median(errors)).astype(int), 
-        confidence_scores, 
-        n_bins=10
-    )
+    # Improved calibration metrics with better binning
+    # Use adaptive binning based on data distribution
+    n_bins = min(10, max(5, len(predictions) // 50))  # Adaptive number of bins
+    try:
+        # Use quantile-based binning for better calibration
+        y_binary = (errors < np.median(errors)).astype(int)
+        calibration_data = calibration_curve(
+            y_binary, 
+            confidence_scores, 
+            n_bins=n_bins,
+            strategy='quantile'  # Use quantile-based binning
+        )
+        fraction_of_positives, mean_predicted_value = calibration_data
+        
+        # Calculate Expected Calibration Error (ECE)
+        bin_boundaries = np.linspace(0, 1, n_bins + 1)
+        bin_lowers = bin_boundaries[:-1]
+        bin_uppers = bin_boundaries[1:]
+        ece = 0
+        for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
+            in_bin = (confidence_scores > bin_lower) & (confidence_scores <= bin_upper)
+            prop_in_bin = in_bin.mean()
+            if prop_in_bin > 0:
+                accuracy_in_bin = y_binary[in_bin].mean()
+                avg_confidence_in_bin = confidence_scores[in_bin].mean()
+                ece += np.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
+    except Exception as e:
+        print(f"   ⚠️  Calibration curve calculation failed: {str(e)}, using fallback")
+        # Fallback: create simple calibration data
+        fraction_of_positives = np.array([0.5])
+        mean_predicted_value = np.array([np.mean(confidence_scores)])
+        ece = 0.0
+        calibration_data = (fraction_of_positives, mean_predicted_value)
     
     # Reliability metrics
-    reliability_score = 1 - np.corrcoef(confidence_scores, errors)[0, 1]
+    corr_val = np.corrcoef(confidence_scores, errors)[0, 1]
+    corr_val = np.nan_to_num(corr_val, nan=0.0) if not np.isnan(corr_val) else 0.0
+    reliability_score = 1 - abs(corr_val)  # Use absolute value for reliability
     
     return {
         'high_conf_mae': high_conf_mae,
@@ -1960,9 +2315,13 @@ def calculate_confidence_metrics(model, X, y_true, threshold=0.7):
         'confidence_improvement': low_conf_mae - high_conf_mae,
         'reliability_score': reliability_score,
         'calibration_data': calibration_data,
+        'ece': ece,
         'mean_confidence': np.mean(confidence_scores),
         'confidence_std': np.std(confidence_scores),
-        'high_conf_ratio': np.mean(high_conf_mask)
+        'confidence_min': np.min(confidence_scores),
+        'confidence_max': np.max(confidence_scores),
+        'high_conf_ratio': np.mean(high_conf_mask),
+        'validation': validation
     }
 
 def visualize_confidence_analysis(confidence_metrics, predictions, confidence_scores, y_true):
@@ -2115,32 +2474,266 @@ def create_feature_importance_analysis_no_plot(model, X, feature_names, method='
     print(f"📊 Creating feature importance analysis using {method} method...")
     
     if method == 'shap':
-        # Use SHAP values for feature importance
-        shap_results = calculate_shap_values(model, X, feature_names)
-        drift_shap = shap_results['drift_shap']
+        try:
+            # Use SHAP values for feature importance
+            shap_results = calculate_shap_values(model, X, feature_names)
+            drift_shap = shap_results['drift_shap']
+            
+            if isinstance(drift_shap, torch.Tensor):
+                drift_shap = drift_shap.detach().cpu().numpy()
+            
+            # Calculate mean absolute SHAP values
+            mean_abs_shap = np.abs(drift_shap).mean(0)
+            
+            # Normalize to ensure meaningful scale
+            total_importance = np.sum(mean_abs_shap)
+            if total_importance < 1e-10:  # If scores are too small, use relative importance
+                # Use relative ranking instead
+                mean_abs_shap = mean_abs_shap + 1e-10  # Add small epsilon to avoid zeros
+                total_importance = np.sum(mean_abs_shap)
+            
+            sorted_indices = np.argsort(mean_abs_shap)[::-1]
+            sorted_features = [feature_names[i] for i in sorted_indices]
+            sorted_scores = mean_abs_shap[sorted_indices]
+            
+            # Calculate cumulative importance (normalized)
+            cumulative_importance = np.cumsum(sorted_scores) / (total_importance + 1e-10)
+            
+            # Find number of features for 80% importance
+            features_for_80 = np.argmax(cumulative_importance >= 0.8) + 1 if len(cumulative_importance) > 0 else len(sorted_features)
+            
+            return {
+                'method': method,
+                'sorted_features': sorted_features,
+                'sorted_scores': sorted_scores,
+                'cumulative_importance': cumulative_importance,
+                'features_for_80_percent': features_for_80,
+                'total_importance': total_importance
+            }
+        except Exception as e:
+            print(f"   ⚠️  SHAP calculation failed: {str(e)}, falling back to permutation")
+            method = 'permutation'  # Fallback to permutation
+    
+    if method == 'permutation':
+        # Permutation-based importance
+        model.eval()
+        with torch.no_grad():
+            X_tensor = torch.FloatTensor(X)
+            base_output = model(X_tensor)[0].detach().numpy()
+            base_score = np.mean(np.abs(base_output))
         
-        if isinstance(drift_shap, torch.Tensor):
-            drift_shap = drift_shap.detach().numpy()
+        importance_scores = np.zeros(len(feature_names))
         
-        # Calculate mean absolute SHAP values
-        mean_abs_shap = np.abs(drift_shap).mean(0)
-        sorted_indices = np.argsort(mean_abs_shap)[::-1]
+        for i in range(len(feature_names)):
+            X_permuted = X.copy()
+            np.random.shuffle(X_permuted[:, i])
+            with torch.no_grad():
+                permuted_output = model(torch.FloatTensor(X_permuted))[0].detach().numpy()
+                permuted_score = np.mean(np.abs(permuted_output))
+            importance_scores[i] = abs(base_score - permuted_score)
+        
+        # Normalize scores
+        total_importance = np.sum(importance_scores)
+        if total_importance < 1e-10:
+            importance_scores = importance_scores + 1e-10
+            total_importance = np.sum(importance_scores)
+        
+        sorted_indices = np.argsort(importance_scores)[::-1]
         sorted_features = [feature_names[i] for i in sorted_indices]
-        sorted_scores = mean_abs_shap[sorted_indices]
+        sorted_scores = importance_scores[sorted_indices]
         
         # Calculate cumulative importance
-        cumulative_importance = np.cumsum(sorted_scores) / np.sum(sorted_scores)
-        
-        # Find number of features for 80% importance
-        features_for_80 = np.argmax(cumulative_importance >= 0.8) + 1
+        cumulative_importance = np.cumsum(sorted_scores) / (total_importance + 1e-10)
+        features_for_80 = np.argmax(cumulative_importance >= 0.8) + 1 if len(cumulative_importance) > 0 else len(sorted_features)
         
         return {
             'method': method,
             'sorted_features': sorted_features,
             'sorted_scores': sorted_scores,
             'cumulative_importance': cumulative_importance,
-            'features_for_80_percent': features_for_80
+            'features_for_80_percent': features_for_80,
+            'total_importance': total_importance
         }
+
+def calculate_quantitative_metrics(predictions, y_true, confidence_scores=None):
+    """
+    Calculate comprehensive quantitative metrics for model evaluation
+    
+    Parameters:
+    - predictions: Model predictions
+    - y_true: True values
+    - confidence_scores: Optional confidence scores
+    
+    Returns:
+    - Dictionary with quantitative metrics
+    """
+    predictions = np.array(predictions)
+    y_true = np.array(y_true)
+    errors = predictions - y_true
+    abs_errors = np.abs(errors)
+    
+    # Basic regression metrics
+    mse = mean_squared_error(y_true, predictions)
+    mae = mean_absolute_error(y_true, predictions)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_true, predictions)
+    
+    # Adjusted R²
+    n = len(y_true)
+    p = 1  # Number of features (simplified)
+    adj_r2 = 1 - (1 - r2) * (n - 1) / (n - p - 1) if n > p + 1 else r2
+    
+    # Information Coefficient (IC) - correlation between predictions and actuals
+    ic, ic_pvalue = pearsonr(predictions, y_true)
+    ic = ic if not np.isnan(ic) else 0.0
+    
+    # Directional accuracy (hit rate)
+    if len(predictions) > 1:
+        pred_direction = np.diff(predictions) > 0
+        true_direction = np.diff(y_true) > 0
+        directional_accuracy = np.mean(pred_direction == true_direction)
+    else:
+        directional_accuracy = 0.0
+    
+    # Sharpe-like ratio (mean return / std of errors)
+    mean_error = np.mean(errors)
+    std_error = np.std(errors)
+    sharpe_ratio = mean_error / (std_error + 1e-10)
+    
+    # Information ratio (mean error / tracking error)
+    tracking_error = std_error
+    information_ratio = mean_error / (tracking_error + 1e-10)
+    
+    # Maximum drawdown
+    cumulative_errors = np.cumsum(errors)
+    running_max = np.maximum.accumulate(cumulative_errors)
+    drawdown = cumulative_errors - running_max
+    max_drawdown = np.min(drawdown) if len(drawdown) > 0 else 0.0
+    
+    # Volatility metrics
+    prediction_volatility = np.std(predictions)
+    actual_volatility = np.std(y_true)
+    volatility_ratio = prediction_volatility / (actual_volatility + 1e-10)
+    
+    # Percentile metrics
+    error_percentiles = {
+        'p5': np.percentile(abs_errors, 5),
+        'p25': np.percentile(abs_errors, 25),
+        'p50': np.percentile(abs_errors, 50),
+        'p75': np.percentile(abs_errors, 75),
+        'p95': np.percentile(abs_errors, 95)
+    }
+    
+    metrics = {
+        'mse': mse,
+        'mae': mae,
+        'rmse': rmse,
+        'r2': r2,
+        'adj_r2': adj_r2,
+        'ic': ic,
+        'ic_pvalue': ic_pvalue,
+        'directional_accuracy': directional_accuracy,
+        'sharpe_ratio': sharpe_ratio,
+        'information_ratio': information_ratio,
+        'tracking_error': tracking_error,
+        'max_drawdown': max_drawdown,
+        'prediction_volatility': prediction_volatility,
+        'actual_volatility': actual_volatility,
+        'volatility_ratio': volatility_ratio,
+        'error_percentiles': error_percentiles,
+        'mean_error': mean_error,
+        'std_error': std_error
+    }
+    
+    # Add confidence-based metrics if available
+    if confidence_scores is not None:
+        confidence_scores = np.array(confidence_scores)
+        high_conf_mask = confidence_scores >= 0.7
+        if np.any(high_conf_mask):
+            high_conf_ic, _ = pearsonr(predictions[high_conf_mask], y_true[high_conf_mask])
+            metrics['high_conf_ic'] = high_conf_ic if not np.isnan(high_conf_ic) else 0.0
+            metrics['high_conf_r2'] = r2_score(y_true[high_conf_mask], predictions[high_conf_mask])
+        else:
+            metrics['high_conf_ic'] = 0.0
+            metrics['high_conf_r2'] = 0.0
+    
+    return metrics
+
+def calculate_statistical_tests(predictions, y_true):
+    """
+    Perform statistical tests on model residuals
+    
+    Parameters:
+    - predictions: Model predictions
+    - y_true: True values
+    
+    Returns:
+    - Dictionary with test results
+    """
+    residuals = np.array(y_true) - np.array(predictions)
+    
+    results = {}
+    
+    # Normality tests
+    try:
+        # Jarque-Bera test
+        jb_stat, jb_pvalue = jarque_bera(residuals)
+        results['jarque_bera'] = {
+            'statistic': jb_stat,
+            'pvalue': jb_pvalue,
+            'is_normal': jb_pvalue > 0.05
+        }
+    except Exception as e:
+        results['jarque_bera'] = {'error': str(e)}
+    
+    try:
+        # Shapiro-Wilk test (for smaller samples)
+        if len(residuals) <= 5000:
+            sw_stat, sw_pvalue = shapiro(residuals)
+            results['shapiro_wilk'] = {
+                'statistic': sw_stat,
+                'pvalue': sw_pvalue,
+                'is_normal': sw_pvalue > 0.05
+            }
+        else:
+            results['shapiro_wilk'] = {'skipped': 'Sample size too large (>5000)'}
+    except Exception as e:
+        results['shapiro_wilk'] = {'error': str(e)}
+    
+    # Autocorrelation test (Ljung-Box)
+    if HAS_STATSMODELS:
+        try:
+            if len(residuals) > 10:
+                lb_result = acorr_ljungbox(residuals, lags=min(10, len(residuals)//4), return_df=True)
+                results['ljung_box'] = {
+                    'statistic': lb_result['lb_stat'].iloc[-1],
+                    'pvalue': lb_result['lb_pvalue'].iloc[-1],
+                    'no_autocorr': lb_result['lb_pvalue'].iloc[-1] > 0.05
+                }
+            else:
+                results['ljung_box'] = {'skipped': 'Insufficient data'}
+        except Exception as e:
+            results['ljung_box'] = {'error': str(e)}
+    else:
+        results['ljung_box'] = {'skipped': 'statsmodels not available'}
+    
+    # Durbin-Watson test for autocorrelation
+    if HAS_STATSMODELS:
+        try:
+            if len(residuals) > 2:
+                dw_stat = durbin_watson(residuals)
+                results['durbin_watson'] = {
+                    'statistic': dw_stat,
+                    'interpretation': 'No autocorrelation' if 1.5 < dw_stat < 2.5 else 'Possible autocorrelation'
+                }
+            else:
+                results['durbin_watson'] = {'skipped': 'Insufficient data'}
+        except Exception as e:
+            results['durbin_watson'] = {'error': str(e)}
+    else:
+        results['durbin_watson'] = {'skipped': 'statsmodels not available'}
+    
+    return results
 
 def generate_explainability_report_no_plots(model, X, y_true, feature_names, ticker="STOCK"):
     """
@@ -2185,73 +2778,166 @@ def generate_explainability_report_no_plots(model, X, y_true, feature_names, tic
     predictions = np.array(predictions)
     confidence_scores = np.array(confidence_scores)
     
-    # 5. Generate summary report
-    print(f"\n📋 EXPLAINABILITY REPORT SUMMARY for {ticker}")
-    print("="*60)
+    # Calculate quantitative metrics
+    quantitative_metrics = calculate_quantitative_metrics(predictions, y_true, confidence_scores)
+    
+    # Calculate statistical tests
+    statistical_tests = calculate_statistical_tests(predictions, y_true)
+    
+    # 5. Generate comprehensive summary report
+    print(f"\n📋 COMPREHENSIVE EXPLAINABILITY REPORT for {ticker}")
+    print("="*70)
+    print(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Executive Summary
+    print(f"\n📊 EXECUTIVE SUMMARY:")
+    print(f"  Model Performance: R² = {quantitative_metrics['r2']:.4f}, IC = {quantitative_metrics['ic']:.4f}")
+    print(f"  Prediction Accuracy: MAE = {quantitative_metrics['mae']:.6f}, RMSE = {quantitative_metrics['rmse']:.6f}")
+    print(f"  Directional Accuracy: {quantitative_metrics['directional_accuracy']:.1%}")
     
     # Model performance metrics
-    mae = mean_absolute_error(y_true, predictions)
-    mse = mean_squared_error(y_true, predictions)
+    print(f"\n🎯 MODEL PERFORMANCE METRICS:")
+    print(f"  Mean Absolute Error (MAE): {quantitative_metrics['mae']:.6f}")
+    print(f"  Mean Squared Error (MSE): {quantitative_metrics['mse']:.6f}")
+    print(f"  Root Mean Squared Error (RMSE): {quantitative_metrics['rmse']:.6f}")
+    print(f"  R² Score: {quantitative_metrics['r2']:.4f}")
+    print(f"  Adjusted R²: {quantitative_metrics['adj_r2']:.4f}")
+    print(f"  Information Coefficient (IC): {quantitative_metrics['ic']:.4f} (p-value: {quantitative_metrics['ic_pvalue']:.4f})")
+    print(f"  Directional Accuracy: {quantitative_metrics['directional_accuracy']:.1%}")
     
-    print(f"\n🎯 MODEL PERFORMANCE:")
-    print(f"  Mean Absolute Error: {mae:.6f}")
-    print(f"  Mean Squared Error: {mse:.6f}")
-    print(f"  Root Mean Squared Error: {np.sqrt(mse):.6f}")
+    # Risk and return metrics
+    print(f"\n📈 RISK & RETURN METRICS:")
+    print(f"  Sharpe Ratio: {quantitative_metrics['sharpe_ratio']:.4f}")
+    print(f"  Information Ratio: {quantitative_metrics['information_ratio']:.4f}")
+    print(f"  Tracking Error: {quantitative_metrics['tracking_error']:.6f}")
+    print(f"  Maximum Drawdown: {quantitative_metrics['max_drawdown']:.6f}")
+    print(f"  Prediction Volatility: {quantitative_metrics['prediction_volatility']:.6f}")
+    print(f"  Actual Volatility: {quantitative_metrics['actual_volatility']:.6f}")
+    print(f"  Volatility Ratio: {quantitative_metrics['volatility_ratio']:.4f}")
+    
+    # Error distribution
+    print(f"\n📊 ERROR DISTRIBUTION:")
+    print(f"  Mean Error: {quantitative_metrics['mean_error']:.6f}")
+    print(f"  Std Error: {quantitative_metrics['std_error']:.6f}")
+    print(f"  5th Percentile: {quantitative_metrics['error_percentiles']['p5']:.6f}")
+    print(f"  25th Percentile: {quantitative_metrics['error_percentiles']['p25']:.6f}")
+    print(f"  Median: {quantitative_metrics['error_percentiles']['p50']:.6f}")
+    print(f"  75th Percentile: {quantitative_metrics['error_percentiles']['p75']:.6f}")
+    print(f"  95th Percentile: {quantitative_metrics['error_percentiles']['p95']:.6f}")
     
     # Confidence metrics
     print(f"\n🎯 CONFIDENCE METRICS:")
     print(f"  Mean Confidence Score: {confidence_metrics['mean_confidence']:.3f}")
+    print(f"  Confidence Range: [{confidence_metrics.get('confidence_min', 0):.3f}, {confidence_metrics.get('confidence_max', 1):.3f}]")
     confidence_std = confidence_metrics['confidence_std']
-    # Use more decimal places or scientific notation for very small numbers
     if abs(confidence_std) < 0.001:
         print(f"  Confidence Standard Deviation: {confidence_std:.6e}")
     else:
         print(f"  Confidence Standard Deviation: {confidence_std:.6f}")
     print(f"  High Confidence Ratio: {confidence_metrics['high_conf_ratio']:.1%}")
     print(f"  Reliability Score: {confidence_metrics['reliability_score']:.3f}")
+    if 'ece' in confidence_metrics:
+        print(f"  Expected Calibration Error (ECE): {confidence_metrics['ece']:.4f}")
     
-    # Feature importance insights
+    # Feature importance insights (normalized)
     print(f"\n🔍 FEATURE IMPORTANCE INSIGHTS:")
-    top_features = feature_importance['sorted_features'][:5]
-    top_scores = feature_importance['sorted_scores'][:5]
+    top_features = feature_importance['sorted_features'][:10]
+    top_scores = feature_importance['sorted_scores'][:10]
     
-    for i, (feature, score) in enumerate(zip(top_features, top_scores)):
-        # Use scientific notation for very small numbers, otherwise use regular notation
-        if abs(score) < 0.001:
-            print(f"  {i+1}. {feature}: {score:.6e}")
-        else:
-            print(f"  {i+1}. {feature}: {score:.6f}")
+    # Normalize scores to percentages for better interpretability
+    total_importance = np.sum(feature_importance['sorted_scores'])
+    if total_importance > 0:
+        top_scores_pct = (top_scores / total_importance) * 100
+        cumulative_pct = np.cumsum(top_scores_pct)
+        
+        for i, (feature, score, pct, cum_pct) in enumerate(zip(top_features, top_scores, top_scores_pct, cumulative_pct)):
+            print(f"  {i+1}. {feature}: {pct:.2f}% (Cumulative: {cum_pct:.2f}%)")
+        
+        # Find features for 80% importance
+        features_for_80 = np.argmax(cumulative_pct >= 80) + 1
+        print(f"\n  Top {features_for_80} features explain 80% of importance")
+    else:
+        for i, (feature, score) in enumerate(zip(top_features, top_scores)):
+            if abs(score) < 0.001:
+                print(f"  {i+1}. {feature}: {score:.6e}")
+            else:
+                print(f"  {i+1}. {feature}: {score:.6f}")
+    
+    # Statistical tests
+    print(f"\n🔬 STATISTICAL TESTS:")
+    if 'jarque_bera' in statistical_tests and 'statistic' in statistical_tests['jarque_bera']:
+        jb = statistical_tests['jarque_bera']
+        print(f"  Jarque-Bera Test: Stat={jb['statistic']:.4f}, p={jb['pvalue']:.4f}, Normal={'Yes' if jb['is_normal'] else 'No'}")
+    if 'ljung_box' in statistical_tests and 'statistic' in statistical_tests['ljung_box']:
+        lb = statistical_tests['ljung_box']
+        print(f"  Ljung-Box Test: Stat={lb['statistic']:.4f}, p={lb['pvalue']:.4f}, No Autocorr={'Yes' if lb['no_autocorr'] else 'No'}")
+    if 'durbin_watson' in statistical_tests and 'statistic' in statistical_tests['durbin_watson']:
+        dw = statistical_tests['durbin_watson']
+        print(f"  Durbin-Watson Test: Stat={dw['statistic']:.4f}, {dw['interpretation']}")
     
     # Risk management insights
     print(f"\n⚠️ RISK MANAGEMENT INSIGHTS:")
     print(f"  High Confidence MAE: {confidence_metrics['high_conf_mae']:.6f}")
     print(f"  Low Confidence MAE: {confidence_metrics['low_conf_mae']:.6f}")
     print(f"  Confidence Improvement: {confidence_metrics['confidence_improvement']:.6f}")
+    if 'high_conf_ic' in quantitative_metrics:
+        print(f"  High Confidence IC: {quantitative_metrics['high_conf_ic']:.4f}")
+        print(f"  High Confidence R²: {quantitative_metrics['high_conf_r2']:.4f}")
     
     if confidence_metrics['confidence_improvement'] > 0:
         print(f"  ✅ Model is more reliable when confident")
     else:
         print(f"  ⚠️ Model confidence may not correlate with accuracy")
     
-    # Recommendations
-    print(f"\n💡 RECOMMENDATIONS:")
-    print(f"  • Trust predictions when confidence > {0.7:.1f}")
-    print(f"  • Focus on top {len([x for x in feature_importance['cumulative_importance'] if x < 0.8])} features for 80% importance")
-    print(f"  • Monitor confidence trends for risk management")
+    # Model validation warnings
+    if 'validation' in confidence_metrics and confidence_metrics['validation']['warnings']:
+        print(f"\n⚠️ MODEL VALIDATION WARNINGS:")
+        for warning in confidence_metrics['validation']['warnings']:
+            print(f"  {warning}")
     
-    return {
+    # Recommendations
+    print(f"\n💡 ACTIONABLE RECOMMENDATIONS:")
+    if quantitative_metrics['r2'] < 0.3:
+        print(f"  ⚠️ Low R² ({quantitative_metrics['r2']:.2f}) - Consider feature engineering or model refinement")
+    if quantitative_metrics['ic'] < 0.1:
+        print(f"  ⚠️ Low IC ({quantitative_metrics['ic']:.2f}) - Model predictions have weak correlation with actuals")
+    if confidence_metrics['high_conf_ratio'] < 0.1:
+        print(f"  ⚠️ Very few high-confidence predictions ({confidence_metrics['high_conf_ratio']:.1%}) - Model may be over-cautious")
+    if 'ece' in confidence_metrics and confidence_metrics['ece'] > 0.1:
+        print(f"  ⚠️ High calibration error ({confidence_metrics['ece']:.3f}) - Confidence scores may not be well-calibrated")
+    
+    print(f"  • Trust predictions when confidence > 0.7")
+    if 'features_for_80' in locals():
+        print(f"  • Focus on top {features_for_80} features for 80% importance")
+    print(f"  • Monitor confidence trends for risk management")
+    print(f"  • Use directional accuracy ({quantitative_metrics['directional_accuracy']:.1%}) for trading signals")
+    
+    # Prepare report data
+    report_data = {
         'shap_results': shap_results,
         'feature_importance': feature_importance,
         'confidence_metrics': confidence_metrics,
+        'quantitative_metrics': quantitative_metrics,
+        'statistical_tests': statistical_tests,
         'predictions': predictions,
         'confidence_scores': confidence_scores,
         'performance_metrics': {
-            'mae': mae,
-            'mse': mse,
-            'rmse': np.sqrt(mse)
+            'mae': quantitative_metrics['mae'],
+            'mse': quantitative_metrics['mse'],
+            'rmse': quantitative_metrics['rmse'],
+            'r2': quantitative_metrics['r2']
         },
         'figures': {}
     }
+    
+    # Save comprehensive report to file
+    try:
+        saved_filename = save_comprehensive_explainability_report(report_data, ticker)
+        print(f"\n✅ Comprehensive report saved to: output/reports/{saved_filename}")
+    except Exception as e:
+        print(f"\n⚠️  Failed to save comprehensive report: {str(e)}")
+    
+    return report_data
 
 def create_interactive_dashboard(model, X, y_true, feature_names, ticker="STOCK"):
     """
@@ -2316,43 +3002,163 @@ def create_interactive_dashboard(model, X, y_true, feature_names, ticker="STOCK"
         row=1, col=2
     )
     
-    # 3. Feature Importance (placeholder - would need SHAP calculation)
-    feature_importance = create_feature_importance_analysis(model, X, feature_names, method='shap')
-    fig.add_trace(
-        go.Bar(x=feature_importance['sorted_features'][:10], 
-               y=feature_importance['sorted_scores'][:10], name='Feature Importance'),
-        row=2, col=1
-    )
+    # 3. Feature Importance (using actual SHAP or permutation importance)
+    try:
+        feature_importance = create_feature_importance_analysis_no_plot(model, X, feature_names, method='shap')
+        # Normalize scores for better visualization
+        importance_scores = feature_importance['sorted_scores'][:10]
+        importance_features = feature_importance['sorted_features'][:10]
+        
+        # Normalize to percentages if scores are very small
+        if np.max(importance_scores) < 0.01:
+            total = np.sum(feature_importance['sorted_scores'])
+            if total > 0:
+                importance_scores = (importance_scores / total) * 100
+                y_label = "Importance Score (%)"
+            else:
+                y_label = "Importance Score"
+        else:
+            y_label = "Importance Score"
+        
+        fig.add_trace(
+            go.Bar(x=importance_features, 
+                   y=importance_scores, 
+                   name='Feature Importance',
+                   marker=dict(color=importance_scores, colorscale='Viridis')),
+            row=2, col=1
+        )
+        fig.update_yaxes(title_text=y_label, row=2, col=1)
+    except Exception as e:
+        print(f"   ⚠️  Feature importance calculation failed: {str(e)}, using fallback")
+        # Fallback to permutation importance
+        try:
+            feature_importance = create_feature_importance_analysis_no_plot(model, X, feature_names, method='permutation')
+            importance_scores = feature_importance['sorted_scores'][:10]
+            importance_features = feature_importance['sorted_features'][:10]
+            fig.add_trace(
+                go.Bar(x=importance_features, 
+                       y=importance_scores, 
+                       name='Feature Importance (Permutation)',
+                       marker=dict(color=importance_scores, colorscale='Viridis')),
+                row=2, col=1
+            )
+        except:
+            # Ultimate fallback
+            fig.add_trace(
+                go.Bar(x=feature_names[:10], y=[1.0]*10, name='Feature Importance (Placeholder)'),
+                row=2, col=1
+            )
     
     # 4. Confidence vs Error
     errors = np.abs(predictions - y_true)
     fig.add_trace(
         go.Scatter(x=confidence_scores, y=errors, mode='markers', 
-                  marker=dict(color=errors, colorscale='Reds', showscale=True),
-                  name='Confidence vs Error'),
+                  marker=dict(color=errors, colorscale='Reds', showscale=True, size=5),
+                  name='Confidence vs Error',
+                  hovertemplate='Confidence: %{x:.3f}<br>Error: %{y:.4f}<extra></extra>'),
         row=2, col=2
     )
     
-    # 5. SHAP Summary (placeholder)
-    fig.add_trace(
-        go.Bar(x=['Feature 1', 'Feature 2', 'Feature 3'], y=[0.3, 0.2, 0.1], name='SHAP Values'),
-        row=3, col=1
-    )
+    # 5. SHAP Summary (using actual SHAP values)
+    try:
+        shap_results = calculate_shap_values(model, X, feature_names, background_size=min(100, len(X)))
+        drift_shap = shap_results['drift_shap']
+        
+        # Calculate mean absolute SHAP values
+        if isinstance(drift_shap, torch.Tensor):
+            drift_shap = drift_shap.detach().cpu().numpy()
+        
+        mean_abs_shap = np.abs(drift_shap).mean(0)
+        sorted_indices = np.argsort(mean_abs_shap)[::-1]
+        top_shap_features = [feature_names[i] for i in sorted_indices[:10]]
+        top_shap_values = mean_abs_shap[sorted_indices][:10]
+        
+        fig.add_trace(
+            go.Bar(x=top_shap_features, 
+                   y=top_shap_values, 
+                   name='SHAP Values',
+                   marker=dict(color=top_shap_values, colorscale='Blues')),
+            row=3, col=1
+        )
+        fig.update_yaxes(title_text="Mean |SHAP Value|", row=3, col=1)
+    except Exception as e:
+        print(f"   ⚠️  SHAP calculation failed: {str(e)}, using feature importance as fallback")
+        # Fallback to feature importance
+        try:
+            if 'importance_features' in locals() and 'importance_scores' in locals():
+                fig.add_trace(
+                    go.Bar(x=importance_features[:10], 
+                           y=importance_scores[:10], 
+                           name='SHAP Values (Fallback)',
+                           marker=dict(color=importance_scores[:10], colorscale='Blues')),
+                    row=3, col=1
+                )
+            else:
+                fig.add_trace(
+                    go.Bar(x=feature_names[:10], y=[0.1]*10, name='SHAP Values (Placeholder)'),
+                    row=3, col=1
+                )
+        except:
+            fig.add_trace(
+                go.Bar(x=['Feature 1', 'Feature 2', 'Feature 3'], y=[0.3, 0.2, 0.1], name='SHAP Values (Placeholder)'),
+                row=3, col=1
+            )
     
-    # 6. Calibration Plot
-    confidence_metrics = calculate_confidence_metrics(model, X, y_true)
-    fraction_of_positives, mean_predicted_value = confidence_metrics['calibration_data']
-    
-    fig.add_trace(
-        go.Scatter(x=mean_predicted_value, y=fraction_of_positives, mode='lines+markers',
-                  name='Calibration', line=dict(color='blue')),
-        row=3, col=2
-    )
-    fig.add_trace(
-        go.Scatter(x=[0, 1], y=[0, 1], mode='lines', line=dict(color='red', dash='dash'),
-                  name='Perfect Calibration'),
-        row=3, col=2
-    )
+    # 6. Calibration Plot (with improved binning)
+    try:
+        confidence_metrics = calculate_confidence_metrics(model, X, y_true)
+        fraction_of_positives, mean_predicted_value = confidence_metrics['calibration_data']
+        
+        # Ensure we have valid data points
+        if len(fraction_of_positives) > 0 and len(mean_predicted_value) > 0:
+            fig.add_trace(
+                go.Scatter(x=mean_predicted_value, y=fraction_of_positives, 
+                          mode='lines+markers',
+                          name='Calibration', 
+                          line=dict(color='blue', width=2),
+                          marker=dict(size=8)),
+                row=3, col=2
+            )
+        else:
+            # Fallback: create simple calibration data
+            mean_predicted_value = np.array([np.mean(confidence_scores)])
+            fraction_of_positives = np.array([0.5])
+            fig.add_trace(
+                go.Scatter(x=mean_predicted_value, y=fraction_of_positives, 
+                          mode='markers',
+                          name='Calibration (Single Point)',
+                          marker=dict(size=10, color='blue')),
+                row=3, col=2
+            )
+        
+        fig.add_trace(
+            go.Scatter(x=[0, 1], y=[0, 1], mode='lines', 
+                      line=dict(color='red', dash='dash', width=2),
+                      name='Perfect Calibration'),
+            row=3, col=2
+        )
+        
+        # Add ECE annotation if available
+        if 'ece' in confidence_metrics:
+            fig.add_annotation(
+                x=0.05, y=0.95,
+                xref='x6', yref='y6',
+                text=f"ECE: {confidence_metrics['ece']:.3f}",
+                showarrow=False,
+                font=dict(size=10)
+            )
+    except Exception as e:
+        print(f"   ⚠️  Calibration plot failed: {str(e)}")
+        # Fallback
+        fig.add_trace(
+            go.Scatter(x=[0.5], y=[0.5], mode='markers', name='Calibration (Fallback)'),
+            row=3, col=2
+        )
+        fig.add_trace(
+            go.Scatter(x=[0, 1], y=[0, 1], mode='lines', line=dict(color='red', dash='dash'),
+                      name='Perfect Calibration'),
+            row=3, col=2
+        )
     
     # Update layout
     fig.update_layout(
@@ -2524,13 +3330,22 @@ def calculate_risk_metrics(returns, confidence_levels=[0.01, 0.05, 0.1], price_p
     # Basic statistics
     metrics['mean_return'] = np.mean(returns)
     metrics['volatility'] = np.std(returns)
-    metrics['skewness'] = np.mean(((returns - np.mean(returns)) / np.std(returns))**3)
-    metrics['kurtosis'] = np.mean(((returns - np.mean(returns)) / np.std(returns))**4) - 3
+    
+    # Skewness and Kurtosis - avoid division by zero if all returns are identical
+    std_returns = np.std(returns)
+    if std_returns > 1e-10:
+        normalized_returns = (returns - np.mean(returns)) / std_returns
+        metrics['skewness'] = np.mean(normalized_returns**3)
+        metrics['kurtosis'] = np.mean(normalized_returns**4) - 3
+    else:
+        metrics['skewness'] = 0.0
+        metrics['kurtosis'] = 0.0
     
     # Value at Risk (VaR) and Conditional VaR (Expected Shortfall)
     for alpha in confidence_levels:
         var = np.percentile(returns, alpha * 100)
-        cvar = np.mean(returns[returns <= var])
+        mask = returns <= var
+        cvar = np.mean(returns[mask]) if np.any(mask) else var
         
         metrics[f'var_{int(alpha*100)}'] = var
         metrics[f'cvar_{int(alpha*100)}'] = cvar
@@ -2880,7 +3695,12 @@ def portfolio_options_analysis(portfolio_data, options_data, num_simulations=100
     correlation_matrix = np.array(portfolio_data[stocks[0]]['correlation_matrix'])
     
     # Cholesky decomposition for correlated random numbers
-    L = np.linalg.cholesky(correlation_matrix)
+    try:
+        L = np.linalg.cholesky(correlation_matrix)
+    except np.linalg.LinAlgError:
+        # Make matrix positive definite by adding small diagonal if needed
+        correlation_matrix = correlation_matrix + np.eye(len(correlation_matrix)) * 1e-6
+        L = np.linalg.cholesky(correlation_matrix)
     
     # Generate correlated paths
     dt = 1/252  # Daily time steps
@@ -3197,9 +4017,15 @@ def demo_advanced_models():
         # Conditional Value at Risk (5%)
         cvar_5 = np.mean(returns[returns <= np.percentile(returns, 5)]) * 100
         
-        # Skewness and Kurtosis
-        skewness = np.mean(((returns - np.mean(returns)) / np.std(returns))**3)
-        kurtosis = np.mean(((returns - np.mean(returns)) / np.std(returns))**4) - 3
+        # Skewness and Kurtosis - avoid division by zero if all returns are identical
+        std_returns = np.std(returns)
+        if std_returns > 1e-10:
+            normalized_returns = (returns - np.mean(returns)) / std_returns
+            skewness = np.mean(normalized_returns**3)
+            kurtosis = np.mean(normalized_returns**4) - 3
+        else:
+            skewness = 0.0
+            kurtosis = 0.0
         
         print(f"{model_name:20} {var_5:10.2f} {cvar_5:10.2f} {skewness:10.3f} {kurtosis:10.3f}")
     
@@ -3208,7 +4034,8 @@ def demo_advanced_models():
     print("="*50)
     
     # Heston insights
-    vol_autocorr = np.corrcoef(vol_mean[:-1], vol_mean[1:])[0,1]
+    vol_autocorr_val = np.corrcoef(vol_mean[:-1], vol_mean[1:])[0,1]
+    vol_autocorr = np.nan_to_num(vol_autocorr_val, nan=0.0) if not np.isnan(vol_autocorr_val) else 0.0
     print(f"🌊 Heston Stochastic Volatility:")
     print(f"   - Volatility autocorrelation: {vol_autocorr:.4f}")
     print(f"   - Volatility clustering effect: High volatility tends to persist")
@@ -3411,7 +4238,7 @@ def implied_volatility_analysis(option_prices, S0, K, T, r, option_type='call'):
                 options={'maxiter': 200, 'ftol': 1e-12}
             )
             implied_vols.append(result.x[0])
-        except:
+        except (ValueError, RuntimeError, np.linalg.LinAlgError) as e:
             implied_vols.append(np.nan)
     
     return np.array(implied_vols)
@@ -4237,77 +5064,3 @@ RECOMMENDATIONS
     print("   • Confidence scoring and reliability assessment")
     print("   • Interactive explainability dashboards")
 
-def demo_quick_explainability(ticker="AAPL"):
-    """
-    Quick explainability analysis for a specific stock
-    """
-    print(f"🔍 Quick Explainability Analysis for {ticker}")
-    print("="*50)
-    
-    try:
-        # This would integrate with the existing enhanced model
-        # For now, we'll show the structure
-        print("📊 This would perform:")
-        print("   • SHAP analysis on real stock data")
-        print("   • Attention visualization for feature focus")
-        print("   • Confidence scoring for predictions")
-        print("   • Regime detection for market states")
-        print("   • Risk management insights")
-        
-        print(f"\n💡 To run full analysis:")
-        print(f"   results = generate_explainability_report(model, X, y, features, '{ticker}')")
-        
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-
-def compare_explainability_methods(model, X, y_true, feature_names):
-    """
-    Compare different explainability methods
-    
-    Parameters:
-    - model: Trained model
-    - X: Input features
-    - y_true: True values
-    - feature_names: Names of features
-    """
-    print("🔍 Comparing Explainability Methods")
-    print("="*50)
-    
-    methods = ['shap', 'permutation']
-    results = {}
-    
-    for method in methods:
-        print(f"\n📊 {method.upper()} Analysis:")
-        try:
-            importance = create_feature_importance_analysis(model, X, feature_names, method=method)
-            results[method] = importance
-            
-            print(f"   ✅ {method.upper()} completed successfully")
-            top_score = importance['sorted_scores'][0]
-            # Use scientific notation for very small numbers
-            if abs(top_score) < 0.001:
-                print(f"   Top feature: {importance['sorted_features'][0]} ({top_score:.6e})")
-            else:
-                print(f"   Top feature: {importance['sorted_features'][0]} ({top_score:.6f})")
-            
-        except Exception as e:
-            print(f"   ❌ {method.upper()} failed: {str(e)}")
-    
-    # Compare results
-    if len(results) > 1:
-        print(f"\n📊 METHOD COMPARISON:")
-        print("-" * 30)
-        
-        for method, result in results.items():
-            print(f"\n{method.upper()} Top 3 Features:")
-            for i, (feature, score) in enumerate(zip(
-                result['sorted_features'][:3], 
-                result['sorted_scores'][:3]
-            )):
-                # Use scientific notation for very small numbers
-                if abs(score) < 0.001:
-                    print(f"   {i+1}. {feature}: {score:.6e}")
-                else:
-                    print(f"   {i+1}. {feature}: {score:.6f}")
-    
-    return results

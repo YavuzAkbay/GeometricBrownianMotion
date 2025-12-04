@@ -18,6 +18,49 @@ import os
 from datetime import datetime
 warnings.filterwarnings('ignore')
 
+# GPU/CUDA/MPS setup and utilities
+def setup_gpu():
+    """Setup GPU device and return device object"""
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        print(f"🚀 GPU Acceleration Available: {torch.cuda.get_device_name(0)}")
+        print(f"   • CUDA Version: {torch.version.cuda}")
+        print(f"   • GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+        print(f"🚀 Apple Metal Performance Shaders (MPS) Available")
+    else:
+        device = torch.device('cpu')
+        print("⚠️  GPU not available, using CPU")
+    return device
+
+def get_device():
+    """Get the current device (GPU if available, CPU otherwise)"""
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        return torch.device('mps')
+    else:
+        return torch.device('cpu')
+
+def to_gpu(tensor_or_array, device=None):
+    """Convert numpy array or tensor to GPU tensor"""
+    if device is None:
+        device = get_device()
+    
+    if isinstance(tensor_or_array, np.ndarray):
+        return torch.from_numpy(tensor_or_array).float().to(device)
+    elif isinstance(tensor_or_array, torch.Tensor):
+        return tensor_or_array.float().to(device)
+    else:
+        return torch.tensor(tensor_or_array, dtype=torch.float32).to(device)
+
+def to_cpu(tensor):
+    """Convert GPU tensor back to numpy array"""
+    if isinstance(tensor, torch.Tensor):
+        return tensor.detach().cpu().numpy()
+    return tensor
+
 # Create output directory structure
 def create_output_directories():
     """Create output directories for saving plots and data"""
@@ -799,7 +842,7 @@ def enhanced_analysis_and_visualization(ticker, model, scaler_X, scaler_y,
     recent_tensor = torch.FloatTensor(recent_data_scaled)
     
     # Get ML predictions
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
     model.eval()
     with torch.no_grad():
         recent_tensor = recent_tensor.to(device)
@@ -1028,7 +1071,7 @@ def enhanced_analysis_with_uncertainty(ticker, model, scaler_X, scaler_y,
     recent_tensor = torch.FloatTensor(recent_data_scaled)
     
     # Get Bayesian predictions with uncertainty
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
     model.eval()
     
     with torch.no_grad():
@@ -1270,7 +1313,7 @@ def train_enhanced_model(ticker, sequence_length=60, epochs=100, model_type='tra
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
     
     # Initialize model
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
     print(f"Using device: {device}")
     
     if model_type == 'transformer':
@@ -1437,7 +1480,7 @@ def train_bayesian_model(ticker, sequence_length=60, epochs=100, num_samples=10,
         print("="*50)
         
         # Calculate uncertainty based on prediction variance using Monte Carlo dropout
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device = get_device()
         model.eval()
         
         # Get the test data for uncertainty estimation
@@ -1814,7 +1857,7 @@ def enhanced_heston_analysis(ticker, model, scaler_X, scaler_y, enhanced_data, f
     recent_data_scaled = scaler_X.transform(recent_data.reshape(-1, recent_data.shape[-1])).reshape(1, sequence_length, -1)
     recent_tensor = torch.FloatTensor(recent_data_scaled)
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
     model.eval()
     with torch.no_grad():
         recent_tensor = recent_tensor.to(device)
@@ -1975,7 +2018,7 @@ def enhanced_regime_switching_analysis(ticker, model, scaler_X, scaler_y, enhanc
     recent_data_scaled = scaler_X.transform(recent_data.reshape(-1, recent_data.shape[-1])).reshape(1, sequence_length, -1)
     recent_tensor = torch.FloatTensor(recent_data_scaled)
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
     model.eval()
     with torch.no_grad():
         recent_tensor = recent_tensor.to(device)
@@ -2149,7 +2192,7 @@ def enhanced_jump_diffusion_analysis(ticker, model, scaler_X, scaler_y, enhanced
     recent_data_scaled = scaler_X.transform(recent_data.reshape(-1, recent_data.shape[-1])).reshape(1, sequence_length, -1)
     recent_tensor = torch.FloatTensor(recent_data_scaled)
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
     model.eval()
     with torch.no_grad():
         recent_tensor = recent_tensor.to(device)

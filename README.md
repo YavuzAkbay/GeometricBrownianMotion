@@ -151,28 +151,101 @@ python -c "import torch, numpy, pandas; print('✅ All dependencies installed su
 
 ### 🚀 GPU Acceleration Setup (Optional but Recommended)
 
-For optimal performance with large-scale Monte Carlo simulations:
+For optimal performance with large-scale Monte Carlo simulations, **GPU acceleration is highly recommended**. 
+
+**Important Note:** PyTorch CUDA wheels are currently available for Python 3.9-3.13. If you're using Python 3.14 or newer, you'll need to use Python 3.13 in a virtual environment for GPU support.
+
+#### Step 1: Create Virtual Environment with Python 3.13 (Recommended)
 
 ```bash
-# For CUDA 11.8 (recommended)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# Windows - Create venv with Python 3.13
+py -3.13 -m venv venv
+
+# Linux/Mac - Create venv with Python 3.13
+python3.13 -m venv venv
+```
+
+#### Step 2: Activate Virtual Environment
+
+**Windows PowerShell:**
+```powershell
+venv\Scripts\activate
+```
+
+**Windows Command Prompt:**
+```cmd
+venv\Scripts\activate.bat
+```
+
+**Linux/Mac:**
+```bash
+source venv/bin/activate
+```
+
+#### Step 3: Install PyTorch with CUDA Support
+
+After activating the virtual environment, install PyTorch with CUDA:
+
+```bash
+# For CUDA 12.6 (recommended for newer GPUs)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 
 # For CUDA 12.1
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# For CPU only (fallback)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# For CUDA 11.8
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 
+# For CPU only (fallback - no GPU support)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+```
+
+#### Step 4: Install Other Dependencies
+
+```bash
+# Install all project dependencies
+pip install -r requirements.txt
+```
+
+#### Step 5: Verify GPU Detection
+
+```bash
 # Verify CUDA availability
-python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}') if torch.cuda.is_available() else None"
+python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}') if torch.cuda.is_available() else None; print(f'GPU: {torch.cuda.get_device_name(0)}') if torch.cuda.is_available() else None"
+
+# Or test with the project's GPU setup function
+python -c "from enhanced_gbm import setup_gpu; setup_gpu()"
+```
+
+You should see output like:
+```
+🚀 GPU Acceleration Available: NVIDIA GeForce RTX 4070
+   • CUDA Version: 12.6
+   • GPU Memory: 12.9 GB
 ```
 
 **GPU Requirements:**
 - NVIDIA GPU with CUDA Compute Capability 3.5 or higher
-- CUDA Toolkit 11.8 or 12.1
+- CUDA Toolkit 11.8, 12.1, or 12.6 (compatible with driver)
 - Minimum 4GB GPU memory (8GB+ recommended for large simulations)
+- Python 3.9-3.13 for CUDA support (use virtual environment if needed)
+
+**Note:** Always activate the virtual environment before running your code to ensure GPU support is available.
 
 ### Basic Usage
+
+**Important:** If you set up GPU acceleration using a virtual environment, make sure to activate it first:
+
+```bash
+# Windows PowerShell
+venv\Scripts\activate
+
+# Windows Command Prompt
+venv\Scripts\activate.bat
+
+# Linux/Mac
+source venv/bin/activate
+```
 
 #### GPU-Accelerated Analysis (Recommended)
 ```python
