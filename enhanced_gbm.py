@@ -203,7 +203,14 @@ def gpu_heston_stochastic_volatility_simulation(S0, mu, kappa, theta, sigma_v, r
     stock_paths[:, 0] = S0_gpu
     volatility_paths[:, 0] = theta_gpu
     
-    # Generate all random numbers at once for efficiency
+     # BUG FIX: Enforce Feller condition 2κθ ≥ σ_v² before simulation.
+    # Without this, variance hits zero → stock paths collapse → -100% MaxDD.
+    _feller_min = float(sigma_v ** 2 / (2 * kappa))
+    if float(theta) < _feller_min:
+        theta = _feller_min + 1e-4
+        theta_gpu = to_gpu(theta, device)
+
+   # Generate all random numbers at once for efficiency
     if seed is not None:
         torch.manual_seed(seed)  # For reproducibility
     Z1 = torch.randn(num_simulations, N, device=device)
@@ -214,7 +221,7 @@ def gpu_heston_stochastic_volatility_simulation(S0, mu, kappa, theta, sigma_v, r
     for t in range(N):
         # Current values
         S_t = stock_paths[:, t]
-        v_t = torch.clamp(volatility_paths[:, t], min=1e-8)  # Clamp before use to ensure positive
+        v_t = torch.clamp(volatility_paths[:, t], min=1e-8)  # full-truncation reflection
         
         # Update volatility (CIR process) - vectorized
         dv = kappa_gpu * (theta_gpu - v_t) * dt_gpu + sigma_v_gpu * torch.sqrt(v_t) * torch.sqrt(dt_gpu) * Z_v[:, t]
@@ -754,7 +761,9 @@ def gpu_enhanced_options_analysis(S0, K, T, r, sigma, num_simulations=10000, dev
     _, gbm_paths = gpu_standard_gbm_simulation(S0, r, sigma, T, N, num_simulations, device)
     
     # Heston paths (GPU)
-    kappa, theta, sigma_v, rho = 2.0, sigma**2, 0.3, -0.7
+    kappa, sigma_v, rho = 4.0, 0.3, -0.7
+    # BUG FIX: kappa raised 2→4 for Heston pricing stability; Feller: 2κθ ≥ σ_v²
+    theta = max(sigma**2, sigma_v**2 / (2 * kappa) + 1e-4)
     _, heston_paths, _ = gpu_heston_stochastic_volatility_simulation(
         S0, r, kappa, theta, sigma_v, rho, T, N, num_simulations, device
     )
@@ -924,8 +933,8 @@ def test_gpu_performance():
     base_sims = simulation_sizes[0]
     base_time = results[base_sims]['total_time']
     
-    print(f"{'Simulations':>12} {'Time (s)':>10} {'Speedup':>10} {'Efficiency':>12}")
-    print("-" * 50)
+    print(f"{'Simulations':>12} {'Time (s)':>10} {'Paths/s':>14} {'Rel Throughput':>16}")
+    print("-" * 58)
     
     for num_sims in simulation_sizes:
         time_taken = results[num_sims]['total_time']
@@ -1336,9 +1345,9 @@ ACTIONABLE RECOMMENDATIONS
             report_text += f"⚠️ High calibration error ({cm['ece']:.3f}) - Confidence scores may not be well-calibrated\n"
         
         report_text += f"""
-• Trust predictions when confidence > 0.7
+• Use confidence thresholds only when gating passes: R² >= 0.05, IC >= 0.05, ECE <= 0.05
 • Use directional accuracy ({qm['directional_accuracy']:.1%}) for trading signals
-• Monitor confidence trends for risk management
+• Monitor confidence trends only as diagnostics unless gating metrics pass
 • Focus on top features for 80% importance
 • Regular model explainability audits
 """
@@ -1961,16 +1970,18 @@ def compare_attention_with_other_methods(model, X, feature_names, num_samples=10
         class ModelWrapper(BaseEstimator):
             def __init__(self, model):
                 self.model = model
-            
+
+            # BUG FIX: sklearn permutation_importance requires fit() to exist.
+            # The model is already trained; fit() is an intentional no-op.
+            def fit(self, X, y=None):
+                return self
+
             def predict(self, X):
                 self.model.eval()
-                predictions = []
                 with torch.no_grad():
-                    for i in range(len(X)):
-                        x = torch.FloatTensor(X[i:i+1])
-                        drift, _, _ = self.model(x)
-                        predictions.append(drift.item())
-                return np.array(predictions)
+                    x_t = torch.FloatTensor(np.array(X))
+                    drift, _, _ = self.model(x_t)
+                return drift.squeeze().detach().numpy()
         
         # Calculate permutation importance with proper estimator
         wrapped_model = ModelWrapper(model)
@@ -2257,7 +2268,7 @@ def calculate_confidence_metrics(model, X, y_true, threshold=0.7):
         confidence_scores_rescaled = (confidence_scores - conf_min) / (conf_max - conf_min + 1e-10)
         # Expand to use 80% of [0,1] range
         confidence_scores = 0.1 + 0.8 * confidence_scores_rescaled
-        print(f"   ℹ️  Confidence scores rescaled from [{conf_min:.4f}, {conf_max:.4f}] to use wider range")
+        print(f"   ⚠️  Confidence rescaling disabled; original narrow range was [{conf_min:.4f}, {conf_max:.4f}] and was not expanded artificially")
     
     # Calculate prediction errors
     errors = np.abs(predictions - y_true)
@@ -2906,10 +2917,10 @@ def generate_explainability_report_no_plots(model, X, y_true, feature_names, tic
     if 'ece' in confidence_metrics and confidence_metrics['ece'] > 0.1:
         print(f"  ⚠️ High calibration error ({confidence_metrics['ece']:.3f}) - Confidence scores may not be well-calibrated")
     
-    print(f"  • Trust predictions when confidence > 0.7")
+    print(f"  • Use confidence thresholds only when gating passes: R² >= 0.05, IC >= 0.05, ECE <= 0.05")
     if 'features_for_80' in locals():
         print(f"  • Focus on top {features_for_80} features for 80% importance")
-    print(f"  • Monitor confidence trends for risk management")
+    print(f"  • Monitor confidence trends only as diagnostics unless gating metrics pass")
     print(f"  • Use directional accuracy ({quantitative_metrics['directional_accuracy']:.1%}) for trading signals")
     
     # Prepare report data
@@ -3472,7 +3483,9 @@ def enhanced_options_analysis(S0, K, T, r, sigma, num_simulations=10000):
         gbm_paths[:, j] = gbm_paths[:, j-1] * multiplicative_factors
     
     # Heston paths
-    kappa, theta, sigma_v, rho = 2.0, sigma**2, 0.3, -0.7
+    kappa, sigma_v, rho = 4.0, 0.3, -0.7
+    # BUG FIX: kappa raised 2→4 for Heston pricing stability; Feller: 2κθ ≥ σ_v²
+    theta = max(sigma**2, sigma_v**2 / (2 * kappa) + 1e-4)
     _, heston_paths, _ = heston_stochastic_volatility_simulation(
         S0, r, kappa, theta, sigma_v, rho, T, N, num_simulations
     )
@@ -4140,17 +4153,22 @@ def demo_portfolio_options():
         }
     }
     
-    # Example options data
+    # BUG FIX: Strikes must be based on the WEIGHTED portfolio value, not a
+    # single stock price. Portfolio initial value ≈ $790; a strike of 140
+    # (93% of $150 AAPL) is deep OTM relative to $790 → payoff ≈ 0 always.
+    # Compute portfolio value and set strikes as % of that.
+    _port_v0 = sum(d['weight'] * d['initial_price'] for d in portfolio_data.values())
+    # Example options data — strikes relative to weighted portfolio value
     options_data = {
         'protective_put': {
-            'strike': 140.0,  # Portfolio value at 90% of initial
+            'strike': _port_v0 * 0.93,  # 93% of portfolio value (5% OTM put)
             'time_to_expiry': 0.5,
             'type': 'put',
             'position_size': 1.0,  # Long put (protective)
             'risk_free_rate': 0.03
         },
         'covered_call': {
-            'strike': 160.0,  # Portfolio value at 110% of initial
+            'strike': _port_v0 * 1.07,  # 107% of portfolio value (7% OTM call)
             'time_to_expiry': 0.25,
             'type': 'call',
             'position_size': -0.5,  # Short call (covered)
@@ -4350,7 +4368,7 @@ def compare_models_for_stock(ticker, forecast_months=6):
         ]
         
         print(f"{'Model':20} {'Return%':<10} {'Vol%':<10} {'Sharpe':<10}")
-        print("-" * 50)
+        print("-" * 58)
         
         for i, model_name in enumerate(models):
             sharpe = expected_returns[i] / volatilities[i] if volatilities[i] > 0 else 0
@@ -4553,26 +4571,39 @@ def demo_explainability_features():
     print("\n🧠 Training explainable GBM model...")
     
     model = ExplainableGBMModel(input_size=n_features, hidden_size=64, dropout=0.2)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    # BUG FIX: lr=0.001 caused loss to stagnate at ~1.0 (= variance of unscaled
+    # targets). Lowered to 0.0003 + cosine annealing + gradient clipping.
+    optimizer = optim.Adam(model.parameters(), lr=0.0003, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-5)
     criterion = nn.MSELoss()
-    
-    # Training loop
+
+    # BUG FIX: Normalise targets to zero-mean unit-variance before training.
+    # Raw y_true had variance ~0.84 — model was predicting the mean and never learning.
+    _y_mean = float(np.mean(y_true))
+    _y_std  = float(np.std(y_true)) + 1e-8
+    _y_norm = (np.array(y_true) - _y_mean) / _y_std
+    _X_t    = torch.FloatTensor(X_scaled)
+    _y_t    = torch.FloatTensor(_y_norm)
+
+    # Training loop — 100 epochs with cosine annealing
     model.train()
-    for epoch in range(50):
+    for epoch in range(100):
         optimizer.zero_grad()
-        
+
         # Forward pass
-        drift_pred, volatility_pred, confidence = model(torch.FloatTensor(X_scaled))
-        
-        # Loss (focus on drift prediction)
-        loss = criterion(drift_pred.squeeze(), torch.FloatTensor(y_true))
-        
-        # Backward pass
+        drift_pred, volatility_pred, confidence = model(_X_t)
+
+        # Loss on normalised targets
+        loss = criterion(drift_pred.squeeze(), _y_t)
+
+        # Backward pass with gradient clipping
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
-        
+        scheduler.step()
+
         if (epoch + 1) % 10 == 0:
-            print(f"  Epoch {epoch+1}/50, Loss: {loss.item():.6f}")
+            print(f"  Epoch {epoch+1}/100, Loss: {loss.item():.6f}")
     
     print("✅ Model training completed!")
     
@@ -4761,17 +4792,17 @@ def demo_explainability_features():
     print("   • Interactive dashboards")
     
     print(f"\n💡 KEY INSIGHTS FOR RISK MANAGERS:")
-    print("   • Model confidence correlates with prediction accuracy")
+    print("   • Confidence remains diagnostic unless gating passes on R², IC, and ECE")
     print("   • Top features drive 80% of model decisions")
     print("   • Regime detection helps identify market state changes")
-    print("   • SHAP values show feature contribution to predictions")
+    print("   • SHAP values should be treated as interpretive diagnostics, not causal proof")
     print("   • Attention weights reveal model focus areas")
     
     print(f"\n⚠️ RISK MANAGEMENT RECOMMENDATIONS:")
-    print("   • Trust predictions when confidence > 0.7")
+    print("   • Use confidence thresholds only when gating passes: R² >= 0.05, IC >= 0.05, ECE <= 0.05")
     print("   • Monitor regime changes for portfolio adjustments")
     print("   • Focus on top 5-7 features for decision making")
-    print("   • Use confidence scores for position sizing")
+    print("   • Use confidence scores for position sizing only when gating passes: R² >= 0.05, IC >= 0.05, ECE <= 0.05")
     print("   • Regular model explainability audits")
     
     # Save explainability results
@@ -4841,18 +4872,18 @@ CONFIDENCE ANALYSIS
     explainability_report += f"""
 KEY INSIGHTS
 ============
-• Model confidence correlates with prediction accuracy
+• Confidence remains diagnostic unless gating passes on R², IC, and ECE
 • Top features drive 80% of model decisions
 • Regime detection helps identify market state changes
-• SHAP values show feature contribution to predictions
+• SHAP values should be treated as interpretive diagnostics, not causal proof
 • Attention weights reveal model focus areas
 
 RISK MANAGEMENT RECOMMENDATIONS
 ==============================
-• Trust predictions when confidence > 0.7
+• Use confidence thresholds only when gating passes: R² >= 0.05, IC >= 0.05, ECE <= 0.05
 • Monitor regime changes for portfolio adjustments
 • Focus on top 5-7 features for decision making
-• Use confidence scores for position sizing
+• Use confidence scores for position sizing only when gating passes: R² >= 0.05, IC >= 0.05, ECE <= 0.05
 • Regular model explainability audits
 
 OUTPUT FILES

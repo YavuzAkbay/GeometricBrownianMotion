@@ -1701,12 +1701,18 @@ def heston_stochastic_volatility_simulation(S0, mu, kappa, theta, sigma_v, rho, 
     volatility_paths[:, 0] = theta  # Start at long-term mean
     
     np.random.seed(42)  # For reproducibility
-    
+
+    # BUG FIX: Enforce Feller condition 2κθ ≥ σ_v² before simulation.
+    # Violation causes variance to hit zero → paths collapse → -100% drawdown.
+    _feller_min = sigma_v ** 2 / (2 * kappa)
+    if theta < _feller_min:
+        theta = _feller_min + 1e-4
+
     for i in range(num_simulations):
         for t in range(N):
             # Current values
             S_t = stock_paths[i, t]
-            v_t = volatility_paths[i, t]
+            v_t = max(volatility_paths[i, t], 0.0)  # full-truncation reflection
             
             # Generate correlated random numbers
             Z1 = np.random.normal(0, 1)
@@ -1714,8 +1720,8 @@ def heston_stochastic_volatility_simulation(S0, mu, kappa, theta, sigma_v, rho, 
             Z_v = rho * Z1 + np.sqrt(1 - rho**2) * Z2
             
             # Update volatility (CIR process)
-            dv = kappa * (theta - v_t) * dt + sigma_v * np.sqrt(v_t) * np.sqrt(dt) * Z_v
-            v_new = max(v_t + dv, 0.0001)  # Ensure positive volatility
+            dv    = kappa * (theta - v_t) * dt + sigma_v * np.sqrt(v_t) * np.sqrt(dt) * Z_v
+            v_new = max(v_t + dv, 0.0)  # full-truncation reflection
             
             # Update stock price using log-Euler scheme to enforce positivity
             S_new = S_t * np.exp((mu - 0.5 * v_new) * dt + np.sqrt(v_new) * np.sqrt(dt) * Z1)
@@ -1866,11 +1872,23 @@ def enhanced_heston_analysis(ticker, model, scaler_X, scaler_y, enhanced_data, f
         ml_vol = ml_vol_pred.cpu().item()
         ml_drift = ml_drift_pred.cpu().item()
     
+    # BUG FIX: ml_drift is a raw Tanh output trained on scaled Close price MSE —
+    # it has NO unit meaning as an annualised return. Using it as mu caused
+    # large negative expected returns. Use Itô-corrected historical drift instead.
+    _ret_h = enhanced_data['Returns'].dropna()
+    _vol_h = _ret_h.std() * np.sqrt(252)
+    _mu_h  = _ret_h.mean() * 252 + 0.5 * _vol_h ** 2  # Itô correction
+
+    # BUG FIX: Feller condition 2κθ ≥ σ_v² must hold to keep variance > 0.
+    # theta is long-term VARIANCE (not volatility). kappa raised 2→4 so
+    # mean-reversion is fast enough relative to sigma_v=0.3 for stable pricing.
+    sigma_v = 0.3
+    kappa   = 4.0   # raised from 2.0 — faster mean-reversion stabilises vol
+    _vol_est = ml_vol if 0.05 <= ml_vol <= 1.0 else _vol_h
+    theta = max(_vol_est ** 2, sigma_v ** 2 / (2 * kappa) + 1e-4)  # Feller guarantee
+
     # Heston model parameters (calibrated to market data)
-    mu = ml_drift  # Risk-free rate
-    kappa = 2.0    # Mean reversion speed
-    theta = ml_vol  # Long-term volatility mean
-    sigma_v = 0.3  # Volatility of volatility
+    mu  = _mu_h    # Itô-corrected historical drift
     rho = -0.7     # Correlation (leverage effect)
     
     T = forecast_months / 12
@@ -2028,8 +2046,14 @@ def enhanced_regime_switching_analysis(ticker, model, scaler_X, scaler_y, enhanc
         ml_drift = ml_drift_pred.cpu().item()
     
     # Define regimes: [Bull Market, Bear Market, Crisis]
-    mu_states = [ml_drift * 1.2, ml_drift * 0.8, ml_drift * 0.3]  # Different drift regimes
-    sigma_states = [ml_vol * 0.8, ml_vol * 1.2, ml_vol * 2.0]    # Different volatility regimes
+    # BUG FIX: ml_drift is a dimensionless Tanh value, not an annualised return.
+    # All regime drifts were near-zero or negative. Use historical drift instead.
+    _ret_r = enhanced_data['Returns'].dropna()
+    _vol_r = _ret_r.std() * np.sqrt(252)
+    _mu_r  = _ret_r.mean() * 252 + 0.5 * _vol_r ** 2
+    _bvol  = ml_vol if 0.05 <= ml_vol <= 1.0 else _vol_r
+    mu_states    = [_mu_r * 1.2, _mu_r * 0.8, _mu_r * 0.3]  # Bull / Bear / Crisis
+    sigma_states = [_bvol * 0.8, _bvol * 1.2, _bvol * 2.0]
     
     # Transition matrix (probabilities of switching between regimes)
     transition_matrix = np.array([
@@ -2202,8 +2226,12 @@ def enhanced_jump_diffusion_analysis(ticker, model, scaler_X, scaler_y, enhanced
         ml_drift = ml_drift_pred.cpu().item()
     
     # Merton jump diffusion parameters
-    mu = ml_drift  # Continuous drift
-    sigma = ml_vol  # Continuous volatility
+    # BUG FIX: ml_drift is a raw Tanh value, not an annualised return.
+    _ret_j = enhanced_data['Returns'].dropna()
+    _vol_j = _ret_j.std() * np.sqrt(252)
+    _mu_j  = _ret_j.mean() * 252 + 0.5 * _vol_j ** 2
+    mu    = _mu_j
+    sigma = ml_vol if 0.05 <= ml_vol <= 1.0 else _vol_j  # Continuous volatility
     lambda_jump = 0.1  # Jump intensity (jumps per year)
     mu_jump = -0.02   # Mean jump size (negative for crash risk)
     sigma_jump = 0.05 # Jump size volatility
