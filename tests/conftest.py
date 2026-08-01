@@ -19,6 +19,10 @@ def synthetic_prices() -> pd.DataFrame:
     ``mu=0.12`` and ``sigma=0.25`` are the ground truth that
     ``estimate_parameters`` must recover.
     """
+    return _make_synthetic_prices()
+
+
+def _make_synthetic_prices() -> pd.DataFrame:
     n = 252 * 6
     mu, sigma, s0 = 0.12, 0.25, 100.0
     dt = 1.0 / 252
@@ -46,6 +50,16 @@ def synthetic_prices() -> pd.DataFrame:
         },
         index=index,
     )
+
+
+@pytest.fixture(scope="module")
+def synthetic_prices_module() -> pd.DataFrame:
+    """Module-scoped copy of :func:`synthetic_prices`.
+
+    Lets the model-training fixtures train once per module rather than once
+    per test.
+    """
+    return _make_synthetic_prices()
 
 
 @pytest.fixture
