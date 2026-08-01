@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # CPU-only torch keeps the runner image small and the run fast.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev,explain]"
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Assert import has no side effects
+        # Importing the package must not create directories or print anything.
+        # The old modules ran create_output_directories() at module scope.
+        run: |
+          mkdir -p /tmp/clean-cwd && cd /tmp/clean-cwd
+          out=$(python -c "import gbm" 2>&1)
+          if [ -n "$out" ]; then echo "import emitted output: $out"; exit 1; fi
+          if [ -d output ]; then echo "import created ./output"; exit 1; fi
+
+      - name: Assert no silenced warnings or bare excepts
+        run: |
+          ! grep -rn "filterwarnings(\s*['\"]ignore" src/
+          ! grep -rnE "^\s*except\s*:" src/
+
+      - name: Test
+        # Network-marked tests are deselected: CI must never depend on yfinance.
+        run: pytest -m "not network" --cov=gbm --cov-report=term-missing

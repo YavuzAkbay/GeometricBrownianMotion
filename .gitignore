@@ -33,10 +33,15 @@ ENV/
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# Test files
-*test*.py
-test_*.py
-*_test.py
+# Test artifacts (test *sources* must stay tracked)
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# OS
+.DS_Store
 
 # Generated output and cache directories
 output/
