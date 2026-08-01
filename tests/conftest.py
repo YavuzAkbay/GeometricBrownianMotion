@@ -29,13 +29,18 @@ def synthetic_prices() -> pd.DataFrame:
     close = s0 * np.exp(np.concatenate([[0.0], np.cumsum(log_increments)]))
 
     index = pd.bdate_range("2018-01-01", periods=len(close))
-    noise = gen.uniform(0.995, 1.005, size=len(close))
+
+    # Intraday range varies per day; a constant band would make high_low_range
+    # a degenerate zero-variance feature.
+    open_ = close * gen.uniform(0.995, 1.005, size=len(close))
+    up = gen.uniform(1.001, 1.020, size=len(close))
+    down = gen.uniform(0.980, 0.999, size=len(close))
 
     return pd.DataFrame(
         {
-            "Open": close * noise,
-            "High": close * 1.01,
-            "Low": close * 0.99,
+            "Open": open_,
+            "High": np.maximum(close, open_) * up,
+            "Low": np.minimum(close, open_) * down,
             "Close": close,
             "Volume": gen.integers(1_000_000, 5_000_000, size=len(close)),
         },
